@@ -1,92 +1,195 @@
+import unicodedata
 import os
 import argparse
+
+from scipy.stats import alpha
+
 import constants
 import pandas as pd
+import json
+from rapidfuzz import process, distance, fuzz
+from rapidfuzz.utils import default_process
+import unicodedata
+import re
 
-# Directory to store CSV files
-RECORDLINKAGE_DIR = "recordlinkage"
-RAPIDFUZZ_DIR = "rapidfuzz"
-os.makedirs(RECORDLINKAGE_DIR, exist_ok=True)
-os.makedirs(RAPIDFUZZ_DIR, exist_ok=True)
+os.makedirs(constants.DEDUPLICATE_BRAND_DIR, exist_ok=True)
 
 def read_data(file_name):
     return pd.read_csv(file_name)
 
-def preprocess_data(output_dir):
-    df = read_data(constants.BRANDS_CSV)
-    df['brand'] = df['brand'].str.upper()
-    df = df.sort_values(by='brand')
-    df = df.reset_index(drop=True)
-    df.to_csv(os.path.join(output_dir, 'preprocessed_data.csv'), index=False)
-    return df
 
-def load_preprocessed_data(output_dir):
+def create_duplicate_csv(df):
+    duplicates = []
+    for brand, group in df.groupby("brand"):
+        if len(group) > 1:
+            for index, row in group.iterrows():
+                duplicates.append({"brand": brand, "index": index, "url": row["url"]})
+
+    duplicates_df = pd.DataFrame(duplicates)
+    return duplicates_df
+
+
+def preprocess_data():
+    # Remove na brands
     print("Preprocessing now...")
-    return preprocess_data(output_dir)
+    for alphabet, csv_file in constants.ALPHABETICAL_BRAND_FILE_MAP.items():
+        df = read_data(os.path.join(constants.DATA_DIRECTORY, csv_file))
+        df_cleaned = df.dropna(subset=['brand'])
+        df['brand'] = df_cleaned['brand'].apply(preprocess_brand)
+        duplicates_df = create_duplicate_csv(df)
+        duplicate_file = constants.DUPLICATE_FILE(alphabet)
+        duplicates_df.to_csv(duplicate_file, index=False)
+        print(f"Duplicate entries saved to {duplicate_file}. Dropping duplicates in preprocessed file")
+        df = df.drop_duplicates(subset="brand", keep="first")
+        df = df.sort_values(by='brand')
+        df = df.reset_index(drop=True)
+        preprocessed_file = constants.PREPROCESSED_FILE(alphabet)
+        df.to_csv(preprocessed_file, index=False)
+        print(f"preprocessed entries saved to {preprocessed_file}.")
 
-def recordlinkage_package(output_dir=RECORDLINKAGE_DIR):
-    import recordlinkage
+def preprocess_brand(brand):
+    try:
+        brand = brand.upper()
+        brand = unicodedata.normalize('NFD', brand)
+        brand = ' '.join(brand.split())
+        brand = re.sub(r'[\'"]', '', brand)
+    except Exception as e:
+        raise Exception(f"Unable to preprocess {brand}: {e}")
+    return brand
 
-    preprocessed_df = load_preprocessed_data(output_dir)
 
-    # Indexation step
-    indexer = recordlinkage.Index()
-    indexer.full()
-    candidate_links = indexer.index(preprocessed_df)
+import pandas as pd
+import json
 
-    compare_cl = recordlinkage.Compare()
-    compare_cl.string(
-        "brand", "brand", method="jarowinkler", threshold=0.80, label="brand_jarowinkler"
+import pandas as pd
+import json
+
+
+def create_map():
+    print("Creating brand_id to brand string map")
+
+    # Read the data
+    ranked_df = read_data("Nov 2024 BV product_brand_id sales - sales rank.csv")
+    iri_df = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
+
+    # Merge the DataFrames on product_brand_id to match rows directly
+    merged_df = pd.merge(
+        iri_df[['brand_id', 'brand']],
+        ranked_df[['product_brand_id', 'product_symbol_id']],
+        left_on='brand_id',
+        right_on='product_brand_id',
+        how='inner'
     )
-    features = compare_cl.compute(candidate_links, preprocessed_df)
 
-    report = features.sum(axis=1).value_counts().sort_index(ascending=False)
-
-    matches = features[features['brand_jarowinkler'] == 1]
-    matches = matches.copy()
-    matches['preprocessed_values'] = matches.index.map(
-        lambda idx: preprocessed_df.iloc[list(idx)]['brand'].tolist() if isinstance(idx, tuple) else preprocessed_df.iloc[idx]['brand']
+    # Group by (product_symbol_id, product_brand_id) and aggregate brand strings into lists
+    brand_id_to_list_of_brand_strings = (
+        merged_df.groupby(['product_symbol_id', 'product_brand_id'])['brand']
+        .apply(list)
+        .to_dict()
     )
 
-    selected_indices = set()
-    for indx in matches.index:
-        if isinstance(indx, tuple):
-            first, second = indx
-            selected_indices.add(first)
-            selected_indices.add(second)
-        else:
-            selected_indices.add(indx)
+    # Convert tuple keys to strings
+    brand_id_to_list_of_brand_strings_str = {
+        f"{int(key[0]) if pd.notna(key[0]) else 'None'},{int(key[1]) if pd.notna(key[1]) else 'None'}": value
+        for key, value in brand_id_to_list_of_brand_strings.items()
+    }
 
-    # Filter rows that are not in the selected indices
-    not_selected = preprocessed_df.loc[~preprocessed_df.index.isin(selected_indices)]
+    # Save the map to a JSON file
+    with open("priority_map.json", "w") as json_file:
+        json.dump(brand_id_to_list_of_brand_strings_str, json_file, indent=4)
 
-    matches.to_csv(os.path.join(output_dir, 'jarowinkler_matches.csv'), index=True)
-    not_selected.to_csv(os.path.join(output_dir, 'nonduplicates.csv'), index=True)
+    print("Priority map saved to 'priority_map.json'")
 
-def rapidfuzz_package(output_dir=RAPIDFUZZ_DIR):
-    from rapidfuzz.distance import JaroWinkler
-    similarity = JaroWinkler.similarity("COLOR CLUB", "COLOURPOP SUPER SHOCK")
-    print(similarity)
-    preprocessed_df = load_preprocessed_data(output_dir)
+
+def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
+    preprocessed_df = preprocess_data(output_dir)
+    names = preprocessed_df['brand'].tolist()
+    matches = process.cdist(names, names, workers=4, scorer=distance.JaroWinkler.distance)
+    import pdb
+    pdb.set_trace()
+    #
+    # def calculate_jaro_winkler(s1, s2):
+    #     return distance.JaroWinkler.distance(s1, s2, prefix_weight=0.20)
+    #
+    # all_pair_results = []
+    # unique_brand_results = []
+    # indices_to_drop = []
+    #
+    # # Iterate through names and calculate Jaro-Winkler distances
+    # # we skip the last element because all other pairs have compared with the last element already
+    #
+    # for i, name1 in enumerate(names[:-1]):
+    #     closest_dist = float('inf')
+    #     for j, name2 in enumerate(names):
+    #         if i < j:
+    #             dist = calculate_jaro_winkler(name1, name2)
+    #             all_pair_results.append((i, j, name1, name2, dist))
+    #             if dist < closest_dist:
+    #                 closest_dist = dist
+    #
+    #     # Brands that never get within the CLOSEST_DIST_LIMIT are filtered out as unique
+    #     # Remove the brand from the df because they are unique
+    #     if closest_dist >= CLOSEST_DIST_LIMIT:
+    #         unique_brand_results.append((i, name1, closest_dist))
+    #         indices_to_drop.append(i)
+    names = preprocessed_df['brand'].tolist()
+    unique_brand_results = []
+    indices_to_drop = []
+
+    for i, name1 in enumerate(names):
+        closest_match = process.extractOne(
+            name1, names, scorer=distance.JaroWinkler.distance, processor=None, score_cutoff=constants.CLOSEST_DIST_LIMIT
+        )
+        import pdb
+        pdb.set_trace()
+        if closest_match:
+            closest_name, closest_dist, closest_idx = closest_match
+            # Keep only if closest distance is below the threshold
+            if closest_dist < constants.CLOSEST_DIST_LIMIT and closest_idx != i:
+                continue  # This brand is not unique
+
+        # If no close matches are found, mark as unique
+        unique_brand_results.append((i, name1))
+        indices_to_drop.append(i)
+
+    # Drop unique brands from the DataFrame
+    filtered_df = preprocessed_df.drop(index=indices_to_drop).reset_index(drop=True)
+    # Convert unique results to DataFrame
+    unique_brand_df = pd.DataFrame(unique_brand_results, columns=['Index', 'Brand'])
+
+    filtered_df.to_csv('filtered_data.csv', index=False)
+    unique_brand_df.to_csv('unique_brands.csv', index=False)
+    # filtered_df = preprocessed_df.drop(index=indices_to_drop).reset_index(drop=True)
+    #
+    # all_pair_df = pd.DataFrame(all_pair_results, columns=['Index1', 'Index2', 'Name1', 'Name2', 'Distance'])
+    # unique_brand_df = pd.DataFrame(unique_brand_results, columns=['Index', 'Name1', 'Closest Distance'])
+    # all_pair_df.to_csv(os.path.join(output_dir, 'all_pair_results.csv'), index=False)
+    # unique_brand_df.to_csv(os.path.join(output_dir, 'unique_brand_results.csv'), index=False)
+    # filtered_df.to_csv(os.path.join(output_dir, 'filtered_data.csv'), index=False)
+
+
 
 def main():
     """Main entry point for the script."""
     # Argument parser setup
     parser = argparse.ArgumentParser(description="String matching using RecordLinkage or RapidFuzz")
     parser.add_argument(
-        "--method",
-        choices=["recordlinkage", "rapidfuzz"],
-        required=True,
-        help="Choose the string matching method: 'recordlinkage' or 'rapidfuzz'.",
+        "--preprocess",
+        action="store_true",
+        help="preprocess the data",
+    )
+    parser.add_argument(
+        "--create_priority_map",
+        action="store_true",
+        help="create priority map from sales data",
     )
     args = parser.parse_args()
-
-    # Execute the selected method
-    if args.method == "recordlinkage":
-        recordlinkage_package()
-    elif args.method == "rapidfuzz":
-        rapidfuzz_package()
+    if args.preprocess:
+        preprocess_data()
+    elif args.create_priority_map:
+        create_map()
     else:
+        distance_check()
         print("Invalid method selected. Please choose 'recordlinkage' or 'rapidfuzz'.")
 
 
