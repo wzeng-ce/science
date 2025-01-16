@@ -1,3 +1,5 @@
 .idea
 __pycache__/
 /environment/
+.DS_Store
+data/
