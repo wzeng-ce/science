@@ -1,14 +1,11 @@
-import unicodedata
 import os
 import argparse
-
 from scipy.stats import alpha
-
 import constants
 import pandas as pd
 import json
-from rapidfuzz import process, distance, fuzz
-from rapidfuzz.utils import default_process
+from rapidfuzz import process, distance
+from rapidfuzz.process import extractOne
 import unicodedata
 import re
 
@@ -16,7 +13,6 @@ os.makedirs(constants.DEDUPLICATE_BRAND_DIR, exist_ok=True)
 
 def read_data(file_name):
     return pd.read_csv(file_name)
-
 
 def create_duplicate_csv(df):
     duplicates = []
@@ -32,18 +28,18 @@ def create_duplicate_csv(df):
 def preprocess_data():
     # Remove na brands
     print("Preprocessing now...")
-    for alphabet, csv_file in constants.ALPHABETICAL_BRAND_FILE_MAP.items():
+    for key, csv_file in constants.BRAND_PREFIX_TO_FILE_NAME.items():
         df = read_data(os.path.join(constants.DATA_DIRECTORY, csv_file))
         df_cleaned = df.dropna(subset=['brand'])
         df['brand'] = df_cleaned['brand'].apply(preprocess_brand)
         duplicates_df = create_duplicate_csv(df)
-        duplicate_file = constants.DUPLICATE_FILE(alphabet)
+        duplicate_file = constants.DUPLICATE_FILE(key)
         duplicates_df.to_csv(duplicate_file, index=False)
         print(f"Duplicate entries saved to {duplicate_file}. Dropping duplicates in preprocessed file")
         df = df.drop_duplicates(subset="brand", keep="first")
         df = df.sort_values(by='brand')
         df = df.reset_index(drop=True)
-        preprocessed_file = constants.PREPROCESSED_FILE(alphabet)
+        preprocessed_file = constants.PREPROCESSED_FILE(key)
         df.to_csv(preprocessed_file, index=False)
         print(f"preprocessed entries saved to {preprocessed_file}.")
 
@@ -56,14 +52,6 @@ def preprocess_brand(brand):
     except Exception as e:
         raise Exception(f"Unable to preprocess {brand}: {e}")
     return brand
-
-
-import pandas as pd
-import json
-
-import pandas as pd
-import json
-
 
 def create_map():
     print("Creating brand_id to brand string map")
@@ -84,7 +72,7 @@ def create_map():
     # Group by (product_symbol_id, product_brand_id) and aggregate brand strings into lists
     brand_id_to_list_of_brand_strings = (
         merged_df.groupby(['product_symbol_id', 'product_brand_id'])['brand']
-        .apply(list)
+        .apply(lambda x: sorted(x.tolist()))
         .to_dict()
     )
 
@@ -100,6 +88,66 @@ def create_map():
 
     print("Priority map saved to 'priority_map.json'")
 
+
+def find_exact_match():
+    # Get symbol_id, brand_id to [brand_strings] map
+    # For every brand_string, look for an exact match in their corresponding {prefix}_preprocessed_data.csv
+    mapped_brand_string_to_brand_id = []
+    preprocessed_data_cache = {}
+
+    def read_map():
+        print("Reading brand_id to brand string map")
+        with open("priority_map.json", "r") as json_file:
+            brand_id_to_list_of_brand_strings = json.load(json_file)
+        return brand_id_to_list_of_brand_strings
+
+
+    def get_preprocessed_data(first_character):
+        # if file not in cache, open the file
+        if first_character not in preprocessed_data_cache:
+            if first_character.isalpha() and first_character.isupper():
+                preprocessed_file = constants.PREPROCESSED_FILE(first_character)
+            else:
+                preprocessed_file = constants.PREPROCESSED_FILE(constants.MISC_NAME)
+            preprocessed_data_cache[first_character] = read_data(preprocessed_file)
+        return preprocessed_data_cache[first_character]
+
+    brand_id_to_brand_strings_map = read_map()
+    for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
+        symbol_id, brand_id = key.split(",")
+        for brand_string in list_of_brand_strings:
+            first_character = brand_string[0]
+            preprocessed_df = get_preprocessed_data(first_character)
+
+            result = extractOne(
+                brand_string,
+                preprocessed_df['brand'].tolist(),
+                scorer=distance.JaroWinkler.distance,
+                score_cutoff=0.0
+            )
+
+            if result:
+                extracted_string, calculated_distance, extracted_index = result
+                mapped_brand_string_to_brand_id.append(
+                    (
+                        brand_string,
+                        brand_id,
+                        symbol_id,
+                        preprocessed_df.iloc[extracted_index]["url"],
+                        extracted_index,
+                    )
+                )
+
+    output_df = pd.DataFrame(
+        mapped_brand_string_to_brand_id,
+        columns=["brand_string", "brand_id", "symbol_id", "url", "local_index"]
+    )
+    output_csv_path = "mapped_brands.csv"
+    output_df.to_csv(output_csv_path, index=False)
+    print(f"Mapped brand data saved to {output_csv_path}")
+
+def check_duplicates():
+    return
 
 def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
     preprocessed_df = preprocess_data(output_dir)
@@ -183,14 +231,28 @@ def main():
         action="store_true",
         help="create priority map from sales data",
     )
+    parser.add_argument(
+        "--find_exact_match",
+        action="store_true",
+        help="Get exact matches from brand strings and map it to thei brand id",
+    )
+    parser.add_argument(
+        "--check_duplicates",
+        action="store_true",
+        help="read from the mapped_brands.csv and check the duplicate map",
+    )
     args = parser.parse_args()
     if args.preprocess:
         preprocess_data()
     elif args.create_priority_map:
         create_map()
+    elif args.find_exact_match:
+        find_exact_match()
+    elif args.check_duplicates:
+        check_duplicates()
     else:
-        distance_check()
-        print("Invalid method selected. Please choose 'recordlinkage' or 'rapidfuzz'.")
+        # distance_check()
+        print("Invalid selection")
 
 
 if __name__ == "__main__":
