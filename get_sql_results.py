@@ -125,6 +125,7 @@ def get_brands_url_not_a_to_z():
 
 
 def get_brands_url_data():
+    counter = 0
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         query = get_brands_url_by_letter(letter)
         query_job = client.query(query)
@@ -133,16 +134,17 @@ def get_brands_url_data():
         file_name = f"{letter}_brands_url.csv"
         file_path = os.path.join(constants.DATA_DIRECTORY, file_name)
         df.to_csv(file_path, index=False)
+        counter += df.shape[0]
         print(f"Saved results for letter {letter} to {file_path}")
 
     query = get_brands_url_not_a_to_z()
     query_job = client.query(query)
     df = query_job.to_dataframe()
-
+    counter += df.shape[0]
     file_name = "misc.csv"
     file_path = os.path.join(constants.DATA_DIRECTORY, file_name)
     df.to_csv(file_path, index=False)
     print(f"Saved results for non-A-Z brands to {file_path}")
-
+    print(f"Obtained {counter} entries.")
 
 get_brands_url_data()

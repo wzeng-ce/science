@@ -4,6 +4,7 @@ from scipy.stats import alpha
 import constants
 import pandas as pd
 import json
+from google.cloud import bigquery
 from rapidfuzz import process, distance
 from rapidfuzz.process import extractOne
 import unicodedata
@@ -19,7 +20,7 @@ def create_duplicate_csv(df):
     for brand, group in df.groupby("brand"):
         if len(group) > 1:
             for index, row in group.iterrows():
-                duplicates.append({"brand": brand, "index": index, "url": row["url"]})
+                duplicates.append({"brand": brand, "unprocessed_index": index, "url": row["url"]})
 
     duplicates_df = pd.DataFrame(duplicates)
     return duplicates_df
@@ -44,9 +45,15 @@ def preprocess_data():
         print(f"preprocessed entries saved to {preprocessed_file}.")
 
 def preprocess_brand(brand):
+    # upper case
+    # remove accents
+    # remove hyphens
+    # get rid of extra whitespaces
     try:
         brand = brand.upper()
-        brand = unicodedata.normalize('NFD', brand)
+        normalized_brand = unicodedata.normalize('NFD', brand)
+        brand = ''.join(c for c in normalized_brand if not unicodedata.combining(c))
+        brand = brand.replace("-", " ").strip()
         brand = ' '.join(brand.split())
         brand = re.sub(r'[\'"]', '', brand)
     except Exception as e:
@@ -55,8 +62,6 @@ def preprocess_brand(brand):
 
 def create_map():
     print("Creating brand_id to brand string map")
-
-    # Read the data
     ranked_df = read_data("Nov 2024 BV product_brand_id sales - sales rank.csv")
     iri_df = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
 
@@ -76,18 +81,34 @@ def create_map():
         .to_dict()
     )
 
-    # Convert tuple keys to strings
     brand_id_to_list_of_brand_strings_str = {
         f"{int(key[0]) if pd.notna(key[0]) else 'None'},{int(key[1]) if pd.notna(key[1]) else 'None'}": value
         for key, value in brand_id_to_list_of_brand_strings.items()
     }
 
-    # Save the map to a JSON file
     with open("priority_map.json", "w") as json_file:
         json.dump(brand_id_to_list_of_brand_strings_str, json_file, indent=4)
-
     print("Priority map saved to 'priority_map.json'")
 
+def get_preprocessed_data(preprocessed_data_cache, first_character):
+    # if file not in cache, open the file
+    if first_character not in preprocessed_data_cache:
+        if first_character.isalpha() and first_character.isupper():
+            preprocessed_file = constants.PREPROCESSED_FILE(first_character)
+        else:
+            preprocessed_file = constants.PREPROCESSED_FILE(constants.MISC_NAME)
+        preprocessed_data_cache[first_character] = read_data(preprocessed_file)
+    return preprocessed_data_cache[first_character]
+
+def get_duplicate_data(duplicate_data_cache, first_character):
+    # if file not in cache, open the file
+    if first_character not in duplicate_data_cache:
+        if first_character.isalpha() and first_character.isupper():
+            duplicate_file = constants.DUPLICATE_FILE(first_character)
+        else:
+            duplicate_file = constants.DUPLICATE_FILE(constants.MISC_NAME)
+        duplicate_data_cache[first_character] = read_data(duplicate_file)
+    return duplicate_data_cache[first_character]
 
 def find_exact_match():
     # Get symbol_id, brand_id to [brand_strings] map
@@ -102,22 +123,12 @@ def find_exact_match():
         return brand_id_to_list_of_brand_strings
 
 
-    def get_preprocessed_data(first_character):
-        # if file not in cache, open the file
-        if first_character not in preprocessed_data_cache:
-            if first_character.isalpha() and first_character.isupper():
-                preprocessed_file = constants.PREPROCESSED_FILE(first_character)
-            else:
-                preprocessed_file = constants.PREPROCESSED_FILE(constants.MISC_NAME)
-            preprocessed_data_cache[first_character] = read_data(preprocessed_file)
-        return preprocessed_data_cache[first_character]
-
     brand_id_to_brand_strings_map = read_map()
     for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
         symbol_id, brand_id = key.split(",")
         for brand_string in list_of_brand_strings:
             first_character = brand_string[0]
-            preprocessed_df = get_preprocessed_data(first_character)
+            preprocessed_df = get_preprocessed_data(preprocessed_data_cache, first_character)
 
             result = extractOne(
                 brand_string,
@@ -140,14 +151,59 @@ def find_exact_match():
 
     output_df = pd.DataFrame(
         mapped_brand_string_to_brand_id,
-        columns=["brand_string", "brand_id", "symbol_id", "url", "local_index"]
+        columns=["brand_string", "brand_id", "symbol_id", "url", "preprocessed_index"]
     )
-    output_csv_path = "mapped_brands.csv"
-    output_df.to_csv(output_csv_path, index=False)
-    print(f"Mapped brand data saved to {output_csv_path}")
+    print(f"skip entries with NOBRAND for now")
+    output_df = output_df[output_df["brand_string"] != "NOBRAND"]
+    output_df.to_csv(constants.MAPPED_BRANDS_WITH_INDICES_CSV, index=False)
+    print(f"Mapped brand data saved to {constants.MAPPED_BRANDS_WITH_INDICES_CSV}")
+
 
 def check_duplicates():
-    return
+    mapped_df = read_data(constants.MAPPED_BRANDS_WITH_INDICES_CSV)
+    cached_data = {}
+    all_merged_dfs = []
+    for index, row in mapped_df.iterrows():
+        brand_string = row["brand_string"]
+        first_character = brand_string[0]
+        duplicate_df = get_duplicate_data(cached_data, first_character)
+        filtered_df = duplicate_df[duplicate_df["brand"] == brand_string]
+        merged_df = pd.merge(
+            mapped_df,
+            filtered_df,
+            left_on="brand_string",
+            right_on="brand",
+            how="inner"
+        )
+        merged_df = merged_df.rename(columns={"url_y": "url"})
+        merged_df = merged_df.drop(["url_x", "brand", "preprocessed_index", "unprocessed_index"], axis=1, errors="ignore")
+        all_merged_dfs.append(merged_df)
+
+    final_mapped_df = pd.concat(all_merged_dfs, ignore_index=True)
+    final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
+
+    final_mapped_df.to_csv(constants.DELIVERABLE_MAPPED_BRANDS_CSV, index=False)
+    print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {constants.DELIVERABLE_MAPPED_BRANDS_CSV}")
+
+def clean_data():
+    # mapped_brands_with_indices will be stale
+    print(f"Cleaning preprocessed data. {constants.MAPPED_BRANDS_WITH_INDICES_CSV} will be stale")
+    mapped_df = read_data(constants.MAPPED_BRANDS_WITH_INDICES_CSV)
+    for key, csv_file in constants.BRAND_PREFIX_TO_FILE_NAME.items():
+        duplicate_file = constants.DUPLICATE_FILE(key)
+        duplicate_df = read_data(duplicate_file)
+        brands_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["brand_string"].tolist()
+        filtered_duplicate_df = duplicate_df[~duplicate_df["brand"].isin(brands_to_drop)]
+        filtered_duplicate_df.to_csv(duplicate_file, index=False)
+        print(f"Cleaned Duplicate entries saved to {duplicate_file}")
+        preprocessed_file = constants.PREPROCESSED_FILE(key)
+        preprocessed_df = read_data(preprocessed_file)
+        indices_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["preprocessed_index"].tolist()
+        filtered_preprocessed_df = preprocessed_df.drop(indices_to_drop)
+        filtered_preprocessed_df.to_csv(preprocessed_file, index=False)
+        print(f"Cleaned preprocessed entries saved to {preprocessed_file}")
+
+
 
 def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
     preprocessed_df = preprocess_data(output_dir)
@@ -216,6 +272,23 @@ def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
     # filtered_df.to_csv(os.path.join(output_dir, 'filtered_data.csv'), index=False)
 
 
+def load_into_bq():
+    client = bigquery.Client()
+    table_id = f"cei-data-science.webscrape.brand_string_to_brand_id_map"
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1,
+        autodetect=True,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE  # Overwrites the table
+    )
+
+    with open(constants.DELIVERABLE_MAPPED_BRANDS_CSV, "rb") as file:
+        load_job = client.load_table_from_file(file, table_id, job_config=job_config)
+
+    load_job.result()
+    print(f"Loaded {load_job.output_rows} rows into {table_id}.")
+
 
 def main():
     """Main entry point for the script."""
@@ -241,15 +314,32 @@ def main():
         action="store_true",
         help="read from the mapped_brands.csv and check the duplicate map",
     )
+    parser.add_argument(
+        "--clean_data",
+        action="store_true",
+        help="remove already matched entries from preprocess and duplicate files",
+    )
+    parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="upload into BQ",
+    )
     args = parser.parse_args()
     if args.preprocess:
         preprocess_data()
     elif args.create_priority_map:
         create_map()
     elif args.find_exact_match:
+        # mapped_brands_with_indices contains brand strings to brand ids
         find_exact_match()
     elif args.check_duplicates:
+        # compares mapped_brands_with_indices and duplicates.csv and maps the duplicates
         check_duplicates()
+    elif args.clean_data:
+        # mapped_brands_with_indices will be stale
+        clean_data()
+    elif args.upload:
+        load_into_bq()
     else:
         # distance_check()
         print("Invalid selection")
