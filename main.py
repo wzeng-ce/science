@@ -59,7 +59,7 @@ def preprocess_brand(brand):
         raise Exception(f"Unable to preprocess {brand}: {e}")
     return brand
 
-def create_map(df_name):
+def get_brand_id_map(df_name):
     if df_name == "iri":
         source_dataset = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
     elif df_name == "gs1":
@@ -114,7 +114,7 @@ def get_duplicate_data(duplicate_data_cache, first_character):
         duplicate_data_cache[first_character] = read_data(duplicate_file)
     return duplicate_data_cache[first_character]
 
-def find_exact_match(df_name):
+def match_brand_str_to_brand_id(df_name):
     # Get symbol_id, brand_id to [brand_strings] map
     # For every brand_string, look for an exact match in their corresponding {prefix}_preprocessed_data.csv
     mapped_brand_string_to_brand_id = []
@@ -315,9 +315,9 @@ def main():
         help="preprocess the data",
     )
     parser.add_argument(
-        "--create_priority_map",
+        "--map_source_to_preprocessed_data",
         choices=["gs1", "iri"],
-        help="Specify the priority map type. Accepted values are 'gs1' or 'iri'."
+        help="Specify the source dataset. Accepted values are 'gs1' or 'iri'."
     )
     parser.add_argument(
         "--find_exact_match",
@@ -342,16 +342,12 @@ def main():
     args = parser.parse_args()
     if args.preprocess:
         preprocess_data()
-    elif args.create_priority_map:
-        create_map(args.create_priority_map)
-    elif args.find_exact_match:
+    elif args.map_source_to_preprocessed_data:
+        get_brand_id_map(args.map_source_to_preprocessed_data)
         # mapped_brands_with_indices contains brand strings to brand ids
-        find_exact_match(args.find_exact_match)
-    elif args.check_duplicates:
+        match_brand_str_to_brand_id(args.map_source_to_preprocessed_data)
         # compares mapped_brands_with_indices and duplicates.csv and maps the duplicates
-        list_of_matches_df = get_all_matches()
-        create_mapped_brands(list_of_matches_df)
-    elif args.clean_data:
+        create_mapped_brands(get_all_matches())
         # mapped_brands_with_indices will be stale
         # deletes duplicates and preprocess entries that are already mapped
         clean_data()
