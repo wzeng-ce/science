@@ -5,3 +5,4 @@ __pycache__/
 data/
 deduplicate_brand/
 *.csv
+*.json

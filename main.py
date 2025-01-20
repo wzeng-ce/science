@@ -1,6 +1,5 @@
 import os
 import argparse
-from scipy.stats import alpha
 import constants
 import pandas as pd
 import json
@@ -60,14 +59,18 @@ def preprocess_brand(brand):
         raise Exception(f"Unable to preprocess {brand}: {e}")
     return brand
 
-def create_map():
+def create_map(df_name):
+    if df_name == "iri":
+        source_dataset = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
+    elif df_name == "gs1":
+        source_dataset = read_data("Nov 2024 BV product_brand_id sales - gs1.csv")
+
     print("Creating brand_id to brand string map")
     ranked_df = read_data("Nov 2024 BV product_brand_id sales - sales rank.csv")
-    iri_df = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
 
     # Merge the DataFrames on product_brand_id to match rows directly
     merged_df = pd.merge(
-        iri_df[['brand_id', 'brand']],
+        source_dataset[['brand_id', 'brand']],
         ranked_df[['product_brand_id', 'product_symbol_id']],
         left_on='brand_id',
         right_on='product_brand_id',
@@ -75,6 +78,7 @@ def create_map():
     )
 
     # Group by (product_symbol_id, product_brand_id) and aggregate brand strings into lists
+    merged_df['brand'] = merged_df['brand'].astype(str).apply(preprocess_brand)
     brand_id_to_list_of_brand_strings = (
         merged_df.groupby(['product_symbol_id', 'product_brand_id'])['brand']
         .apply(lambda x: sorted(x.tolist()))
@@ -86,9 +90,9 @@ def create_map():
         for key, value in brand_id_to_list_of_brand_strings.items()
     }
 
-    with open("priority_map.json", "w") as json_file:
+    with open(f"priority_map_{df_name}.json", "w") as json_file:
         json.dump(brand_id_to_list_of_brand_strings_str, json_file, indent=4)
-    print("Priority map saved to 'priority_map.json'")
+    print(f"Priority map saved to 'priority_map_{df_name}.json'")
 
 def get_preprocessed_data(preprocessed_data_cache, first_character):
     # if file not in cache, open the file
@@ -110,20 +114,20 @@ def get_duplicate_data(duplicate_data_cache, first_character):
         duplicate_data_cache[first_character] = read_data(duplicate_file)
     return duplicate_data_cache[first_character]
 
-def find_exact_match():
+def find_exact_match(df_name):
     # Get symbol_id, brand_id to [brand_strings] map
     # For every brand_string, look for an exact match in their corresponding {prefix}_preprocessed_data.csv
     mapped_brand_string_to_brand_id = []
     preprocessed_data_cache = {}
 
-    def read_map():
+    def read_map(df_name):
         print("Reading brand_id to brand string map")
-        with open("priority_map.json", "r") as json_file:
+        with open(f"priority_map_{df_name}.json", "r") as json_file:
             brand_id_to_list_of_brand_strings = json.load(json_file)
         return brand_id_to_list_of_brand_strings
 
 
-    brand_id_to_brand_strings_map = read_map()
+    brand_id_to_brand_strings_map = read_map(df_name)
     for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
         symbol_id, brand_id = key.split(",")
         for brand_string in list_of_brand_strings:
@@ -159,7 +163,7 @@ def find_exact_match():
     print(f"Mapped brand data saved to {constants.MAPPED_BRANDS_WITH_INDICES_CSV}")
 
 
-def check_duplicates():
+def get_all_matches():
     mapped_df = read_data(constants.MAPPED_BRANDS_WITH_INDICES_CSV)
     cached_data = {}
     all_merged_dfs = []
@@ -178,12 +182,23 @@ def check_duplicates():
         merged_df = merged_df.rename(columns={"url_y": "url"})
         merged_df = merged_df.drop(["url_x", "brand", "preprocessed_index", "unprocessed_index"], axis=1, errors="ignore")
         all_merged_dfs.append(merged_df)
+    return all_merged_dfs
 
-    final_mapped_df = pd.concat(all_merged_dfs, ignore_index=True)
+
+def create_mapped_brands(list_of_dfs):
+    final_mapped_df = pd.concat(list_of_dfs, ignore_index=True)
     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
 
-    final_mapped_df.to_csv(constants.DELIVERABLE_MAPPED_BRANDS_CSV, index=False)
-    print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {constants.DELIVERABLE_MAPPED_BRANDS_CSV}")
+    # Check if the file already exists
+    file_path = constants.DELIVERABLE_MAPPED_BRANDS_CSV
+    if os.path.exists(file_path):
+        existing_df = pd.read_csv(file_path)
+        final_mapped_df = pd.concat([existing_df, final_mapped_df], ignore_index=True)
+        final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
+
+    final_mapped_df.to_csv(file_path, index=False)
+    print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {file_path}")
+
 
 def clean_data():
     # mapped_brands_with_indices will be stale
@@ -301,13 +316,13 @@ def main():
     )
     parser.add_argument(
         "--create_priority_map",
-        action="store_true",
-        help="create priority map from sales data",
+        choices=["gs1", "iri"],
+        help="Specify the priority map type. Accepted values are 'gs1' or 'iri'."
     )
     parser.add_argument(
         "--find_exact_match",
-        action="store_true",
-        help="Get exact matches from brand strings and map it to thei brand id",
+        choices=["gs1", "iri"],
+        help="Get exact matches from brand strings and map it to the brand id Accepted values are 'gs1' or 'iri'.",
     )
     parser.add_argument(
         "--check_duplicates",
@@ -328,15 +343,17 @@ def main():
     if args.preprocess:
         preprocess_data()
     elif args.create_priority_map:
-        create_map()
+        create_map(args.create_priority_map)
     elif args.find_exact_match:
         # mapped_brands_with_indices contains brand strings to brand ids
-        find_exact_match()
+        find_exact_match(args.find_exact_match)
     elif args.check_duplicates:
         # compares mapped_brands_with_indices and duplicates.csv and maps the duplicates
-        check_duplicates()
+        list_of_matches_df = get_all_matches()
+        create_mapped_brands(list_of_matches_df)
     elif args.clean_data:
         # mapped_brands_with_indices will be stale
+        # deletes duplicates and preprocess entries that are already mapped
         clean_data()
     elif args.upload:
         load_into_bq()
