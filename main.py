@@ -157,7 +157,8 @@ def match_brand_str_to_brand_id(df_name):
         mapped_brand_string_to_brand_id,
         columns=["brand_string", "brand_id", "symbol_id", "url", "preprocessed_index"]
     )
-    print(f"skip entries with NOBRAND for now")
+
+    print(f"skip {output_df[output_df['brand_string'] == 'NOBRAND'].shape[0]} entries with NOBRAND for now")
     output_df = output_df[output_df["brand_string"] != "NOBRAND"]
     output_df.to_csv(constants.MAPPED_BRANDS_WITH_INDICES_CSV, index=False)
     print(f"Mapped brand data saved to {constants.MAPPED_BRANDS_WITH_INDICES_CSV}")
@@ -189,7 +190,6 @@ def create_mapped_brands(list_of_dfs):
     final_mapped_df = pd.concat(list_of_dfs, ignore_index=True)
     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
 
-    # Check if the file already exists
     file_path = constants.DELIVERABLE_MAPPED_BRANDS_CSV
     if os.path.exists(file_path):
         existing_df = pd.read_csv(file_path)
@@ -318,16 +318,6 @@ def main():
         "--map_source_to_preprocessed_data",
         choices=["gs1", "iri"],
         help="Specify the source dataset. Accepted values are 'gs1' or 'iri'."
-    )
-    parser.add_argument(
-        "--find_exact_match",
-        choices=["gs1", "iri"],
-        help="Get exact matches from brand strings and map it to the brand id Accepted values are 'gs1' or 'iri'.",
-    )
-    parser.add_argument(
-        "--check_duplicates",
-        action="store_true",
-        help="read from the mapped_brands.csv and check the duplicate map",
     )
     parser.add_argument(
         "--clean_data",
