@@ -19,7 +19,7 @@ def create_duplicate_csv(df):
     for brand, group in df.groupby("brand"):
         if len(group) > 1:
             for index, row in group.iterrows():
-                duplicates.append({"brand": brand, "unprocessed_index": index, "url": row["url"]})
+                duplicates.append({"brand": brand, "unprocessed_index": index, "asin": row["asin"]})
 
     duplicates_df = pd.DataFrame(duplicates)
     return duplicates_df
@@ -148,14 +148,14 @@ def match_brand_str_to_brand_id(df_name):
                         brand_string,
                         brand_id,
                         symbol_id,
-                        preprocessed_df.iloc[extracted_index]["url"],
+                        preprocessed_df.iloc[extracted_index]["asin"],
                         extracted_index,
                     )
                 )
 
     output_df = pd.DataFrame(
         mapped_brand_string_to_brand_id,
-        columns=["brand_string", "brand_id", "symbol_id", "url", "preprocessed_index"]
+        columns=["brand_string", "brand_id", "symbol_id", "asin", "preprocessed_index"]
     )
 
     print(f"skip {output_df[output_df['brand_string'] == 'NOBRAND'].shape[0]} entries with NOBRAND for now")
@@ -180,8 +180,8 @@ def get_all_matches():
             right_on="brand",
             how="inner"
         )
-        merged_df = merged_df.rename(columns={"url_y": "url"})
-        merged_df = merged_df.drop(["url_x", "brand", "preprocessed_index", "unprocessed_index"], axis=1, errors="ignore")
+        merged_df = merged_df.rename(columns={"asin_y": "asin"})
+        merged_df = merged_df.drop(["asin_x", "brand", "preprocessed_index", "unprocessed_index"], axis=1, errors="ignore")
         all_merged_dfs.append(merged_df)
     return all_merged_dfs
 
@@ -202,22 +202,39 @@ def create_mapped_brands(list_of_dfs):
 
 def clean_data():
     # mapped_brands_with_indices will be stale
-    print(f"Cleaning preprocessed data. {constants.MAPPED_BRANDS_WITH_INDICES_CSV} will be stale")
+    print(f"Cleaning duplicate and preprocessed data. {constants.MAPPED_BRANDS_WITH_INDICES_CSV} will be stale")
     mapped_df = read_data(constants.MAPPED_BRANDS_WITH_INDICES_CSV)
     for key, csv_file in constants.BRAND_PREFIX_TO_FILE_NAME.items():
         duplicate_file = constants.DUPLICATE_FILE(key)
         duplicate_df = read_data(duplicate_file)
-        brands_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["brand_string"].tolist()
+        if key == "misc":
+            brands_to_drop = mapped_df[~mapped_df["brand_string"].str.match(r'^[A-Z]', na=False)]["brand_string"].tolist()
+        else:
+            brands_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["brand_string"].tolist()
         filtered_duplicate_df = duplicate_df[~duplicate_df["brand"].isin(brands_to_drop)]
         filtered_duplicate_df.to_csv(duplicate_file, index=False)
-        print(f"Cleaned Duplicate entries saved to {duplicate_file}")
         preprocessed_file = constants.PREPROCESSED_FILE(key)
         preprocessed_df = read_data(preprocessed_file)
         indices_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["preprocessed_index"].tolist()
         filtered_preprocessed_df = preprocessed_df.drop(indices_to_drop)
         filtered_preprocessed_df.to_csv(preprocessed_file, index=False)
-        print(f"Cleaned preprocessed entries saved to {preprocessed_file}")
 
+
+def count_duplicates():
+    print("Counting brands...")
+    for key, csv_file in constants.BRAND_PREFIX_TO_FILE_NAME.items():
+        duplicate_file = constants.DUPLICATE_FILE(key)
+        duplicate_df = read_data(duplicate_file)
+        result = (
+            duplicate_df.groupby("brand")
+            .size()
+            .reset_index(name="count")
+            .sort_values(by="count", ascending=False)
+        )
+
+        output_file = f"{key}_brand_count_index.csv"
+        result.to_csv(os.path.join(constants.DEDUPLICATE_BRAND_DIR, output_file), index=False)
+        print(f"Saved brand counts to {output_file}")
 
 
 def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
@@ -320,9 +337,9 @@ def main():
         help="Specify the source dataset. Accepted values are 'gs1' or 'iri'."
     )
     parser.add_argument(
-        "--clean_data",
+        "--get_count",
         action="store_true",
-        help="remove already matched entries from preprocess and duplicate files",
+        help="get a count of all the brands and store their indices csvs in alphabetical order",
     )
     parser.add_argument(
         "--upload",
@@ -333,14 +350,16 @@ def main():
     if args.preprocess:
         preprocess_data()
     elif args.map_source_to_preprocessed_data:
+        # Create brand_id to brand string map from iri or gs1
         get_brand_id_map(args.map_source_to_preprocessed_data)
-        # mapped_brands_with_indices contains brand strings to brand ids
         match_brand_str_to_brand_id(args.map_source_to_preprocessed_data)
         # compares mapped_brands_with_indices and duplicates.csv and maps the duplicates
         create_mapped_brands(get_all_matches())
         # mapped_brands_with_indices will be stale
         # deletes duplicates and preprocess entries that are already mapped
         clean_data()
+    elif args.get_count:
+        count_duplicates()
     elif args.upload:
         load_into_bq()
     else:

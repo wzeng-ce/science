@@ -12,9 +12,9 @@ def get_brands_url_by_letter(letter):
       SAFE_CAST(LEFT(asin, 9) AS INT) IS NOT NULL  -- ISBN 10 with or without check digit
       OR REGEXP_CONTAINS(byline, '(Format:)|(Rated:)|(Formato:)|(Clasificado:)')
       OR REGEXP_CONTAINS(byline, r'(^by)|(^.*? by)[A-Z]')  -- e.g., "byOscar Wilde". Capital to minimize false positives
-      OR REGEXP_CONTAINS(byline, r'\\(.*?\\)')  -- Broad, so chance for false positives, but small amount selected
+      OR REGEXP_CONTAINS(byline, r'\(.*?\)')  -- Broad, so chance for false positives, but small amount selected
     );
-
+    
     WITH amzn_media AS (
       SELECT 
         * 
@@ -22,44 +22,59 @@ def get_brands_url_by_letter(letter):
       WHERE 
         is_amzn_media(url_asin, byline) OR is_amzn_media(parsed_asin, byline)
     ),
-
+    
     amzn_media_asins AS (
       SELECT DISTINCT url_asin AS asin FROM amzn_media
       UNION DISTINCT
       SELECT DISTINCT parsed_asin AS asin FROM amzn_media
     ),
-
+    
     amzn_media_product_ids AS (
       SELECT
-        product_id
-      FROM `data-enrichment-helios-prod.helios_pipeline_product_tagging.product_codes` a
+        a.product_id,
+        a.product_code
+      FROM `cei-de-platform.helios_pipeline_product_tagging.product_codes` a
       INNER JOIN amzn_media_asins b
       ON a.product_code = b.asin
     ),
-
+    
     products_full_no_amzn_media AS (
       SELECT
         a.*,
+        b.product_code,
         c.source
-      FROM `data-enrichment-helios-prod.helios_pipeline_product_tagging.products_full` a
+      FROM `cei-de-platform.helios_pipeline_product_tagging.products_full` a
       LEFT JOIN amzn_media_product_ids b USING (product_id)
       INNER JOIN `cei-data-science.dev_cpd_products_dbt.product_sources` c USING (source_id)
       WHERE
         source_id <> 100091 OR b.product_id IS NULL
     )
-
-    SELECT DISTINCT 
+    
+    select distinct
       a.brand,
-      b.url
-    FROM products_full_no_amzn_media a
-    INNER JOIN (
-      SELECT DISTINCT
-        url,
-        UPPER(brand_clean) AS brand
-      FROM `cei-data-science.webscrape.amzn_product_data`
-    ) b 
-    ON UPPER(a.brand) = b.brand
-    WHERE UPPER(a.brand) LIKE '{letter.upper()}%';
+      c.product_code asin,
+    
+    -- start with product_catalog, since these are the brand strings that get propogated to the client-facing tables
+    from `cei-de-platform.helios_pipeline_product_tagging.product_catalog` a 
+    
+    -- inner join on just Posiedon Amazon data, but excuding Amazon media
+    inner join (
+      select * from products_full_no_amzn_media
+      where source_id = 100091  -- filter to product_ids from Amazon poseidon data
+    ) b using (product_id)
+    
+    -- bring in all ASINs associated with each product_id (multiple ASINs can be group together under a single product_id)
+    left join (
+      select
+        product_id,
+        product_code
+      from `cei-de-platform.helios_pipeline_product_tagging.product_codes`
+      where product_code_type = 'asin'
+    ) c using (product_id)
+    
+    where
+      a.category_id is not null
+      AND UPPER(a.brand) LIKE '{letter}%';
     """
     return sql_query
 
@@ -72,9 +87,9 @@ def get_brands_url_not_a_to_z():
       SAFE_CAST(LEFT(asin, 9) AS INT) IS NOT NULL  -- ISBN 10 with or without check digit
       OR REGEXP_CONTAINS(byline, '(Format:)|(Rated:)|(Formato:)|(Clasificado:)')
       OR REGEXP_CONTAINS(byline, r'(^by)|(^.*? by)[A-Z]')  -- e.g., "byOscar Wilde". Capital to minimize false positives
-      OR REGEXP_CONTAINS(byline, r'\\(.*?\\)')  -- Broad, so chance for false positives, but small amount selected
+      OR REGEXP_CONTAINS(byline, r'\(.*?\)')  -- Broad, so chance for false positives, but small amount selected
     );
-
+    
     WITH amzn_media AS (
       SELECT 
         * 
@@ -82,44 +97,60 @@ def get_brands_url_not_a_to_z():
       WHERE 
         is_amzn_media(url_asin, byline) OR is_amzn_media(parsed_asin, byline)
     ),
-
+    
     amzn_media_asins AS (
       SELECT DISTINCT url_asin AS asin FROM amzn_media
       UNION DISTINCT
       SELECT DISTINCT parsed_asin AS asin FROM amzn_media
     ),
-
+    
     amzn_media_product_ids AS (
       SELECT
-        product_id
-      FROM `data-enrichment-helios-prod.helios_pipeline_product_tagging.product_codes` a
+        a.product_id,
+        a.product_code
+      FROM `cei-de-platform.helios_pipeline_product_tagging.product_codes` a
       INNER JOIN amzn_media_asins b
       ON a.product_code = b.asin
     ),
-
+    
     products_full_no_amzn_media AS (
       SELECT
         a.*,
+        b.product_code,
         c.source
-      FROM `data-enrichment-helios-prod.helios_pipeline_product_tagging.products_full` a
+      FROM `cei-de-platform.helios_pipeline_product_tagging.products_full` a
       LEFT JOIN amzn_media_product_ids b USING (product_id)
       INNER JOIN `cei-data-science.dev_cpd_products_dbt.product_sources` c USING (source_id)
       WHERE
         source_id <> 100091 OR b.product_id IS NULL
     )
-
-    SELECT DISTINCT 
+    
+    
+    select distinct
       a.brand,
-      b.url
-    FROM products_full_no_amzn_media a
-    INNER JOIN (
-      SELECT DISTINCT
-        url,
-        UPPER(brand_clean) AS brand
-      FROM `cei-data-science.webscrape.amzn_product_data`
-    ) b 
-    ON UPPER(a.brand) = b.brand
-    WHERE NOT (REGEXP_CONTAINS(UPPER(a.brand), r'^[A-Z]'));
+      c.product_code asin,
+    
+    -- start with product_catalog, since these are the brand strings that get propogated to the client-facing tables
+    from `cei-de-platform.helios_pipeline_product_tagging.product_catalog` a 
+    
+    -- inner join on just Posiedon Amazon data, but excuding Amazon media
+    inner join (
+      select * from products_full_no_amzn_media
+      where source_id = 100091  -- filter to product_ids from Amazon poseidon data
+    ) b using (product_id)
+    
+    -- bring in all ASINs associated with each product_id (multiple ASINs can be group together under a single product_id)
+    left join (
+      select
+        product_id,
+        product_code
+      from `cei-de-platform.helios_pipeline_product_tagging.product_codes`
+      where product_code_type = 'asin'
+    ) c using (product_id)
+    
+    WHERE   
+        a.category_id IS NOT NULL
+        AND NOT REGEXP_CONTAINS(UPPER(a.brand), r'^[A-Z]');
     """
     return sql_query
 
