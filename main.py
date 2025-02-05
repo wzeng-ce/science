@@ -5,7 +5,7 @@ import pandas as pd
 import json
 from google.cloud import bigquery
 from rapidfuzz import process, distance
-from rapidfuzz.process import extractOne
+from rapidfuzz.process import extractOne, extract
 import unicodedata
 import re
 
@@ -48,6 +48,7 @@ def preprocess_brand(brand):
     # remove accents
     # remove hyphens
     # get rid of extra whitespaces
+    # remove single and double quotes
     try:
         brand = brand.upper()
         normalized_brand = unicodedata.normalize('NFD', brand)
@@ -237,71 +238,55 @@ def count_duplicates():
         print(f"Saved brand counts to {output_file}")
 
 
-def distance_check(output_dir=constants.DEDUPLICATE_BRAND_DIR):
-    preprocessed_df = preprocess_data(output_dir)
-    names = preprocessed_df['brand'].tolist()
-    matches = process.cdist(names, names, workers=4, scorer=distance.JaroWinkler.distance)
-    import pdb
-    pdb.set_trace()
-    #
-    # def calculate_jaro_winkler(s1, s2):
-    #     return distance.JaroWinkler.distance(s1, s2, prefix_weight=0.20)
-    #
-    # all_pair_results = []
-    # unique_brand_results = []
-    # indices_to_drop = []
-    #
-    # # Iterate through names and calculate Jaro-Winkler distances
-    # # we skip the last element because all other pairs have compared with the last element already
-    #
-    # for i, name1 in enumerate(names[:-1]):
-    #     closest_dist = float('inf')
-    #     for j, name2 in enumerate(names):
-    #         if i < j:
-    #             dist = calculate_jaro_winkler(name1, name2)
-    #             all_pair_results.append((i, j, name1, name2, dist))
-    #             if dist < closest_dist:
-    #                 closest_dist = dist
-    #
-    #     # Brands that never get within the CLOSEST_DIST_LIMIT are filtered out as unique
-    #     # Remove the brand from the df because they are unique
-    #     if closest_dist >= CLOSEST_DIST_LIMIT:
-    #         unique_brand_results.append((i, name1, closest_dist))
-    #         indices_to_drop.append(i)
-    names = preprocessed_df['brand'].tolist()
-    unique_brand_results = []
-    indices_to_drop = []
+def find_nearest_match(df_name):
+    # Get symbol_id, brand_id to [brand_strings] map
+    # For every brand_string, look for the top 10 closest match within a 0.15 distance
+    # in their corresponding {prefix}_preprocessed_data.csv
+    mapped_brand_string_to_brand_id = []
+    preprocessed_data_cache = {}
 
-    for i, name1 in enumerate(names):
-        closest_match = process.extractOne(
-            name1, names, scorer=distance.JaroWinkler.distance, processor=None, score_cutoff=constants.CLOSEST_DIST_LIMIT
-        )
-        import pdb
-        pdb.set_trace()
-        if closest_match:
-            closest_name, closest_dist, closest_idx = closest_match
-            # Keep only if closest distance is below the threshold
-            if closest_dist < constants.CLOSEST_DIST_LIMIT and closest_idx != i:
-                continue  # This brand is not unique
+    def read_map(df_name):
+        print("Reading brand_id to brand string map")
+        with open(f"priority_map_{df_name}.json", "r") as json_file:
+            brand_id_to_list_of_brand_strings = json.load(json_file)
+        return brand_id_to_list_of_brand_strings
 
-        # If no close matches are found, mark as unique
-        unique_brand_results.append((i, name1))
-        indices_to_drop.append(i)
+    brand_id_to_brand_strings_map = read_map(df_name)
+    for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
+        symbol_id, brand_id = key.split(",")
+        for iri_brand_string in list_of_brand_strings:
+            first_character = iri_brand_string[0]
+            preprocessed_df = get_preprocessed_data(preprocessed_data_cache, first_character)
+            result = extract(
+                iri_brand_string,
+                preprocessed_df['brand'].tolist(),
+                scorer=distance.JaroWinkler.distance,
+                score_cutoff=0.15,
+                limit=10
+            )
+            if result:
+                for tup in result:
+                    extracted_string, jarowinkler_distance, extracted_index = tup
+                    mapped_brand_string_to_brand_id.append(
+                        (
+                            iri_brand_string,
+                            extracted_string,
+                            jarowinkler_distance,
+                            brand_id,
+                            symbol_id,
+                            preprocessed_df.iloc[extracted_index]["asin"],
+                            extracted_index,
+                        )
+                    )
 
-    # Drop unique brands from the DataFrame
-    filtered_df = preprocessed_df.drop(index=indices_to_drop).reset_index(drop=True)
-    # Convert unique results to DataFrame
-    unique_brand_df = pd.DataFrame(unique_brand_results, columns=['Index', 'Brand'])
 
-    filtered_df.to_csv('filtered_data.csv', index=False)
-    unique_brand_df.to_csv('unique_brands.csv', index=False)
-    # filtered_df = preprocessed_df.drop(index=indices_to_drop).reset_index(drop=True)
-    #
-    # all_pair_df = pd.DataFrame(all_pair_results, columns=['Index1', 'Index2', 'Name1', 'Name2', 'Distance'])
-    # unique_brand_df = pd.DataFrame(unique_brand_results, columns=['Index', 'Name1', 'Closest Distance'])
-    # all_pair_df.to_csv(os.path.join(output_dir, 'all_pair_results.csv'), index=False)
-    # unique_brand_df.to_csv(os.path.join(output_dir, 'unique_brand_results.csv'), index=False)
-    # filtered_df.to_csv(os.path.join(output_dir, 'filtered_data.csv'), index=False)
+    output_df = pd.DataFrame(
+        mapped_brand_string_to_brand_id,
+        columns=["iri_brand_string", "found_brand_string", "jarowinkler_distance", "brand_id", "symbol_id", "asin", "preprocessed_index"]
+    )
+    output_df = output_df.sort_values(by="jarowinkler_distance", ascending=True)
+    output_df.to_csv(constants.CLOSEST_BRANDS_WITH_INDICES_CSV, index=False)
+
 
 
 def load_into_bq():
@@ -342,6 +327,11 @@ def main():
         help="get a count of all the brands and store their indices csvs in alphabetical order",
     )
     parser.add_argument(
+        "--get_closest_match",
+        action="store_true",
+        help="get closest match with jaro winkler (weighted prefix)",
+    )
+    parser.add_argument(
         "--upload",
         action="store_true",
         help="upload into BQ",
@@ -358,8 +348,10 @@ def main():
         # mapped_brands_with_indices will be stale
         # deletes duplicates and preprocess entries that are already mapped
         clean_data()
-    elif args.get_count:
         count_duplicates()
+    elif args.get_closest_match:
+        find_nearest_match('iri')
+
     elif args.upload:
         load_into_bq()
     else:
