@@ -57,7 +57,7 @@ def get_brands_url_by_letter(letter):
     -- start with product_catalog, since these are the brand strings that get propogated to the client-facing tables
     from `cei-de-platform.helios_pipeline_product_tagging.product_catalog` a 
     
-    -- inner join on just Posiedon Amazon data, but excuding Amazon media
+    -- inner join on just Posiedon Amazon data, but excluding Amazon media
     inner join (
       select * from products_full_no_amzn_media
       where source_id = 100091  -- filter to product_ids from Amazon poseidon data
@@ -162,7 +162,7 @@ def get_brands_url_data():
         query_job = client.query(query)
         df = query_job.to_dataframe()
 
-        file_name = f"{letter}_brands_url.csv"
+        file_name = f"{letter}_brands.csv"
         file_path = os.path.join(constants.DATA_DIRECTORY, file_name)
         df.to_csv(file_path, index=False)
         counter += df.shape[0]

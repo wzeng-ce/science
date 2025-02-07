@@ -115,11 +115,22 @@ def get_duplicate_data(duplicate_data_cache, first_character):
         duplicate_data_cache[first_character] = read_data(duplicate_file)
     return duplicate_data_cache[first_character]
 
+def get_original_data(original_data_cache, first_character):
+    if first_character not in original_data_cache:
+        if first_character.isalpha() and first_character.isupper():
+            original_file = constants.BRAND_PREFIX_TO_FILE_NAME[first_character]
+        else:
+            original_file = constants.BRAND_PREFIX_TO_FILE_NAME[constants.MISC_NAME]
+        csv_file = os.path.join(constants.DATA_DIRECTORY, original_file)
+        original_data_cache[first_character] = read_data(csv_file)
+    return original_data_cache[first_character]
+
 def match_brand_str_to_brand_id(df_name):
     # Get symbol_id, brand_id to [brand_strings] map
     # For every brand_string, look for an exact match in their corresponding {prefix}_preprocessed_data.csv
     mapped_brand_string_to_brand_id = []
     preprocessed_data_cache = {}
+    original_data_cache = {}
 
     def read_map(df_name):
         print("Reading brand_id to brand string map")
@@ -127,14 +138,13 @@ def match_brand_str_to_brand_id(df_name):
             brand_id_to_list_of_brand_strings = json.load(json_file)
         return brand_id_to_list_of_brand_strings
 
-
+    # find the exact match to brand_string
     brand_id_to_brand_strings_map = read_map(df_name)
     for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
         symbol_id, brand_id = key.split(",")
         for brand_string in list_of_brand_strings:
             first_character = brand_string[0]
             preprocessed_df = get_preprocessed_data(preprocessed_data_cache, first_character)
-
             result = extractOne(
                 brand_string,
                 preprocessed_df['brand'].tolist(),
@@ -144,19 +154,18 @@ def match_brand_str_to_brand_id(df_name):
 
             if result:
                 extracted_string, calculated_distance, extracted_index = result
+                product_asin = preprocessed_df.iloc[extracted_index]["asin"]
                 mapped_brand_string_to_brand_id.append(
                     (
                         brand_string,
                         brand_id,
                         symbol_id,
-                        preprocessed_df.iloc[extracted_index]["asin"],
-                        extracted_index,
-                    )
-                )
+                        product_asin,
+                    ))
 
     output_df = pd.DataFrame(
         mapped_brand_string_to_brand_id,
-        columns=["brand_string", "brand_id", "symbol_id", "asin", "preprocessed_index"]
+        columns=["brand_string", "brand_id", "symbol_id", "asin"]
     )
 
     print(f"skip {output_df[output_df['brand_string'] == 'NOBRAND'].shape[0]} entries with NOBRAND for now")
@@ -164,39 +173,80 @@ def match_brand_str_to_brand_id(df_name):
     output_df.to_csv(constants.MAPPED_BRANDS_WITH_INDICES_CSV, index=False)
     print(f"Mapped brand data saved to {constants.MAPPED_BRANDS_WITH_INDICES_CSV}")
 
+def find_original_brand_strings(original_df, asin):
+    """
+    brand string has been preprocessed
+    get the original brand string before the preprocessing
+    returns a list because there may be more than 1 brand string associated to an asin
+    """
+    return original_df[original_df['asin'] == asin]['brand'].tolist()
+
+
+import pandas as pd
+
 
 def get_all_matches():
+    """"
+    Get brand_string matches from mapped_brands_with_indices.csv
+    Go through duplicates.csv to get all duplicate brand_strings
+    """
     mapped_df = read_data(constants.MAPPED_BRANDS_WITH_INDICES_CSV)
-    cached_data = {}
-    all_merged_dfs = []
-    for index, row in mapped_df.iterrows():
-        brand_string = row["brand_string"]
-        first_character = brand_string[0]
-        duplicate_df = get_duplicate_data(cached_data, first_character)
-        filtered_df = duplicate_df[duplicate_df["brand"] == brand_string]
-        merged_df = pd.merge(
-            mapped_df,
-            filtered_df,
-            left_on="brand_string",
-            right_on="brand",
-            how="inner"
-        )
-        merged_df = merged_df.rename(columns={"asin_y": "asin"})
-        merged_df = merged_df.drop(["asin_x", "brand", "preprocessed_index", "unprocessed_index"], axis=1, errors="ignore")
-        all_merged_dfs.append(merged_df)
-    return all_merged_dfs
+    output_rows = []
+    duplicate_cached_data = {}
+    original_data_cache = {}
+    # Group by first character for batch processing
+    grouped_mapped = mapped_df.groupby(mapped_df["brand_string"].str[0])
+    for first_character, group in grouped_mapped:
+        duplicate_df = get_duplicate_data(duplicate_cached_data, first_character)
+        # Get original brand string, before preprocessing
+        original_df = get_original_data(original_data_cache, first_character)
+        for _, row in group.iterrows():
+            brand_string = row["brand_string"]
+            # Filter duplicate_df for matches with the current brand_string
+            filtered_df = duplicate_df[duplicate_df["brand"] == brand_string]
+            if filtered_df.empty:
+                # No matches in duplicates, so save all entries of single ASIN
+                # Unfortunately, there can be multiple brand strings per ASIN
+                list_of_original_brand_strings_per_asin = find_original_brand_strings(original_df, row['asin'])
+                output_rows.extend(
+                    {
+                        "brand_string": original_brand_string,
+                        "brand_id": row["brand_id"],
+                        "symbol_id": row["symbol_id"],
+                        "asin": row["asin"]
+                    }
+                    for original_brand_string in list_of_original_brand_strings_per_asin
+                )
+                continue
+
+            all_new_rows = []
+            for _, filtered_row in filtered_df.iterrows():
+                # Get all original brand strings for the matched ASIN
+                list_of_original_brand_strings_per_asin = find_original_brand_strings(original_df, filtered_row['asin'])
+                new_rows = [
+                    {
+                        "brand_string": original_brand_string,
+                        "brand_id": row["brand_id"],
+                        "symbol_id": row["symbol_id"],
+                        "asin": filtered_row["asin"]
+                    }
+                    for original_brand_string in list_of_original_brand_strings_per_asin
+                ]
+                if new_rows:
+                    all_new_rows.extend(new_rows)
+                else:
+                    print(f"Warning: No brand strings found for ASIN {filtered_row['asin']}")
+            output_rows.extend(all_new_rows)
+    return pd.DataFrame(output_rows)
 
 
-def create_mapped_brands(list_of_dfs):
-    final_mapped_df = pd.concat(list_of_dfs, ignore_index=True)
+def create_mapped_brands(final_mapped_df):
     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
-
     file_path = constants.DELIVERABLE_MAPPED_BRANDS_CSV
-    if os.path.exists(file_path):
-        existing_df = pd.read_csv(file_path)
-        final_mapped_df = pd.concat([existing_df, final_mapped_df], ignore_index=True)
-        final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
-
+    # if os.path.exists(file_path):
+    #     existing_df = pd.read_csv(file_path)
+    #     final_mapped_df = pd.concat([existing_df, final_mapped_df], ignore_index=True)
+    #     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
     final_mapped_df.to_csv(file_path, index=False)
     print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {file_path}")
 
@@ -212,13 +262,14 @@ def clean_data():
             brands_to_drop = mapped_df[~mapped_df["brand_string"].str.match(r'^[A-Z]', na=False)]["brand_string"].tolist()
         else:
             brands_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["brand_string"].tolist()
-        filtered_duplicate_df = duplicate_df[~duplicate_df["brand"].isin(brands_to_drop)]
-        filtered_duplicate_df.to_csv(duplicate_file, index=False)
+
+        dropped_brands_duplicate_df = duplicate_df[~duplicate_df["brand"].isin(brands_to_drop)]
+        dropped_brands_duplicate_df.to_csv(duplicate_file, index=False)
         preprocessed_file = constants.PREPROCESSED_FILE(key)
         preprocessed_df = read_data(preprocessed_file)
-        indices_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]["preprocessed_index"].tolist()
-        filtered_preprocessed_df = preprocessed_df.drop(indices_to_drop)
-        filtered_preprocessed_df.to_csv(preprocessed_file, index=False)
+        asins_to_drop = mapped_df[mapped_df["brand_string"].str.startswith(key, na=False)]['asin'].tolist()
+        dropped_asins_preprocessed_df = preprocessed_df[~preprocessed_df['asin'].isin(asins_to_drop)]
+        dropped_asins_preprocessed_df.to_csv(preprocessed_file, index=False)
 
 
 def count_duplicates():
@@ -235,7 +286,7 @@ def count_duplicates():
 
         output_file = f"{key}_brand_count_index.csv"
         result.to_csv(os.path.join(constants.DEDUPLICATE_BRAND_DIR, output_file), index=False)
-        print(f"Saved brand counts to {output_file}")
+    print(f"Saved brand counts to brand_count_index.csv")
 
 
 def find_nearest_match(df_name):
@@ -308,7 +359,6 @@ def load_into_bq():
 
 
 def main():
-    """Main entry point for the script."""
     # Argument parser setup
     parser = argparse.ArgumentParser(description="String matching using RecordLinkage or RapidFuzz")
     parser.add_argument(
