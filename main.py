@@ -44,18 +44,22 @@ def preprocess_data():
     print(f"Duplicate and preprocessed entries saved to {constants.DATA_DIRECTORY}.")
 
 def preprocess_brand(brand):
-    # upper case
-    # remove accents
-    # remove hyphens
-    # get rid of extra whitespaces
-    # remove single and double quotes
     try:
         brand = brand.upper()
-        normalized_brand = unicodedata.normalize('NFD', brand)
+        # Remove accents
+        normalized_brand = unicodedata.normalize('NFKD', brand)
         brand = ''.join(c for c in normalized_brand if not unicodedata.combining(c))
-        brand = brand.replace("-", " ").strip()
-        brand = ' '.join(brand.split())
+
+        # Replace hyphens and plus signs with placeholders
+        brand = brand.replace("-", "_hyphen_")
+        brand = brand.replace("+", "_plus_")
+
+        # Remove single and double quotes
         brand = re.sub(r'[\'"]', '', brand)
+        # Collapse multiple spaces into one
+        brand = ' '.join(brand.split())
+        # Trim extra spaces
+        brand = brand.strip()
     except Exception as e:
         raise Exception(f"Unable to preprocess {brand}: {e}")
     return brand
