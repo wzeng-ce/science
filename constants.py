@@ -1,14 +1,13 @@
 import os
 
 CLOSEST_DIST_LIMIT = 0.39
-
+DATA_SOURCES = ["iri"]
 BRANDS_CSV = "brands.csv"
 A_BRANDS_CSV = "A_brands.csv"
 PREPROCESSED_CSV = "preprocessed_data.csv"
 MATCHES_CSV = "jarowinkler_matches.csv"
-NON_DUPLICATES_CSV = "nonduplicates.csv"
-MAPPED_BRANDS_WITH_INDICES_CSV = "mapped_brands_with_indices.csv"
-CLOSEST_BRANDS_WITH_INDICES_CSV = "closest_brands_with_indices.csv"
+BRANDS_THAT_MATCH_CSV = "brands_that_match.csv"
+CLOSEST_BRANDS_CSV = "closest_brands.csv"
 DELIVERABLE_MAPPED_BRANDS_CSV = "deliverable_mapped_brands.csv"
 
 DATA_DIRECTORY = "data"
