@@ -1,17 +1,19 @@
 import os
 
-CLOSEST_DIST_LIMIT = 0.39
+DATA_DIRECTORY = "data"
+MAPPINGS_DIRECTORY = "mappings"
+DEDUPLICATE_BRAND_DIR = "deduplicate_brand"
+
 DATA_SOURCES = ["iri"]
 BRANDS_CSV = "brands.csv"
-A_BRANDS_CSV = "A_brands.csv"
 PREPROCESSED_CSV = "preprocessed_data.csv"
-MATCHES_CSV = "jarowinkler_matches.csv"
-BRANDS_THAT_MATCH_CSV = "brands_that_match.csv"
+BRANDS_THAT_MATCH_CSV = os.path.join(MAPPINGS_DIRECTORY, "brands_that_match.csv")
+MANUAL_CLUSTERS_JSON = os.path.join(MAPPINGS_DIRECTORY, "manual_clusters.json")
 CLOSEST_BRANDS_CSV = "closest_brands.csv"
 DELIVERABLE_MAPPED_BRANDS_CSV = "deliverable_mapped_brands.csv"
+def get_brand_clusters_file(df_name):
+    return os.path.join(MAPPINGS_DIRECTORY, f"symbol_brand_brandstring_clusters_{df_name}.json")
 
-DATA_DIRECTORY = "data"
-DEDUPLICATE_BRAND_DIR = "deduplicate_brand"
 def DUPLICATE_FILE(prefix):
     return os.path.join(DEDUPLICATE_BRAND_DIR, f"{prefix}_duplicates.csv")
 def PREPROCESSED_FILE(prefix):

@@ -66,12 +66,12 @@ def preprocess_brand(brand):
 
 def get_brand_id_map(df_name):
     if df_name == "iri":
-        source_dataset = read_data("Nov 2024 BV product_brand_id sales - iri.csv")
+        source_dataset = read_data(os.path.join(constants.MAPPINGS_DIRECTORY, "Nov 2024 BV product_brand_id sales - iri.csv"))
     elif df_name == "gs1":
-        source_dataset = read_data("Nov 2024 BV product_brand_id sales - gs1.csv")
+        source_dataset = read_data(os.path.join(constants.MAPPINGS_DIRECTORY, "Nov 2024 BV product_brand_id sales - gs1.csv"))
 
     print("Creating brand_id to brand string map")
-    ranked_df = read_data("Nov 2024 BV product_brand_id sales - sales rank.csv")
+    ranked_df = read_data(os.path.join(constants.MAPPINGS_DIRECTORY, "Nov 2024 BV product_brand_id sales - sales rank.csv"))
 
     # Merge the DataFrames on product_brand_id to match rows directly
     merged_df = pd.merge(
@@ -94,10 +94,10 @@ def get_brand_id_map(df_name):
         f"{int(key[0]) if pd.notna(key[0]) else 'None'},{int(key[1]) if pd.notna(key[1]) else 'None'}": value
         for key, value in brand_id_to_list_of_brand_strings.items()
     }
-
-    with open(f"priority_map_{df_name}.json", "w") as json_file:
+    file_path = constants.get_brand_clusters_file(df_name)
+    with open(file_path, "w") as json_file:
         json.dump(brand_id_to_list_of_brand_strings_str, json_file, indent=4)
-    print(f"Priority map saved to 'priority_map_{df_name}.json'")
+    print(f"clusters saved to {file_path}")
 
 def get_preprocessed_data(preprocessed_data_cache, first_character):
     # if file not in cache, open the file
@@ -129,20 +129,45 @@ def get_original_data(original_data_cache, first_character):
         original_data_cache[first_character] = read_data(csv_file)
     return original_data_cache[first_character]
 
+def read_cluster_json(df_name):
+    print("Reading brand_id to brand string map")
+    file_path = constants.get_brand_clusters_file(df_name)
+    with open(file_path, "r") as json_file:
+        brand_id_to_list_of_brand_strings = json.load(json_file)
+    return brand_id_to_list_of_brand_strings
+
+def load_manual_clusters():
+    """Load manually defined brand clusters from JSON."""
+    if os.path.exists(constants.MANUAL_CLUSTERS_JSON):
+        with open(constants.MANUAL_CLUSTERS_JSON, "r") as file:
+            return json.load(file)
+    return {}
+
+def merge_json_maps(primary_map, secondary_map):
+    """
+    Merges two JSON dictionaries.
+    - If a key exists in both, it appends values from secondary_map to primary_map.
+    - If a key exists only in secondary_map, it is added to primary_map.
+    """
+    merged_map = primary_map.copy()  # Start with the primary map
+
+    for key, values in secondary_map.items():
+        if key in merged_map:
+            merged_map[key] = sorted(merged_map[key] + values)
+        else:
+            merged_map[key] = values
+    return merged_map
+
 def match_brand_str_to_brand_id(df_name):
+    # Assumes that clusters are already built
     # Get symbol_id, brand_id to [brand_strings] map
     # For every brand_string, look for an exact match in their corresponding {prefix}_preprocessed_data.csv
     mapped_brand_string_to_brand_id = []
     preprocessed_data_cache = {}
-
-    def read_map(df_name):
-        print("Reading brand_id to brand string map")
-        with open(f"priority_map_{df_name}.json", "r") as json_file:
-            brand_id_to_list_of_brand_strings = json.load(json_file)
-        return brand_id_to_list_of_brand_strings
-
+    # combine manual mapping and data source mapping
+    manual_map = load_manual_clusters()
+    brand_id_to_brand_strings_map = merge_json_maps(read_cluster_json(df_name), manual_map)
     # find the exact match to brand_string
-    brand_id_to_brand_strings_map = read_map(df_name)
     for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
         symbol_id, brand_id = key.split(",")
         for brand_string in list_of_brand_strings:
@@ -187,7 +212,7 @@ def find_original_brand_strings(original_df, asin):
 
 def get_all_matches():
     """"
-    Get brand_string matches from mapped_brands_with_indices.csv
+    Get brand_string matches from brands_that_match
     Go through duplicates.csv to get all duplicate brand_strings
     """
     mapped_df = read_data(constants.BRANDS_THAT_MATCH_CSV)
@@ -243,7 +268,7 @@ def get_all_matches():
 def write_mapped_brands(final_mapped_df):
     final_mapped_df = pd.concat(final_mapped_df, ignore_index=True)
     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
-    file_path = constants.DELIVERABLE_MAPPED_BRANDS_CSV
+    file_path = os.path.join(constants.MAPPINGS_DIRECTORY, constants.DELIVERABLE_MAPPED_BRANDS_CSV)
     final_mapped_df.to_csv(file_path, index=False)
     print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {file_path}")
 
@@ -299,13 +324,9 @@ def find_nearest_match(df_name):
     mapped_brand_string_to_brand_id = []
     preprocessed_data_cache = {}
     print("Getting nearest matches")
-    def read_map(df_name):
-        print("Reading brand_id to brand string map")
-        with open(f"priority_map_{df_name}.json", "r") as json_file:
-            brand_id_to_list_of_brand_strings = json.load(json_file)
-        return brand_id_to_list_of_brand_strings
-
-    brand_id_to_brand_strings_map = read_map(df_name)
+    # combine manual mapping and data source mapping
+    manual_map = load_manual_clusters()
+    brand_id_to_brand_strings_map = merge_json_maps(read_cluster_json(df_name), manual_map)
     for key, list_of_brand_strings in brand_id_to_brand_strings_map.items():
         symbol_id, brand_id = key.split(",")
         for iri_brand_string in list_of_brand_strings:
@@ -338,7 +359,7 @@ def find_nearest_match(df_name):
         columns=["iri_brand_string", "found_brand_string", "jarowinkler_distance", "brand_id", "symbol_id", "asin"]
     )
     output_df = output_df.sort_values(by="jarowinkler_distance", ascending=True)
-    output_df.to_csv(constants.CLOSEST_BRANDS_CSV, index=False)
+    output_df.to_csv(os.path.join(constants.MAPPINGS_DIRECTORY, constants.CLOSEST_BRANDS_CSV), index=False)
 
 
 
@@ -388,14 +409,22 @@ def main():
         action="store_true",
         help="upload into BQ",
     )
+    parser.add_argument(
+        "--create_clusters_from_sources",
+        action="store_true",
+        help="Map brand_ids to their brands"
+    )
     args = parser.parse_args()
     if args.preprocess:
         preprocess_data()
+    elif args.create_clusters_from_sources:
+        # Create brand_id to brand string map from iri or gs1
+        for data_source in constants.DATA_SOURCES:
+            get_brand_id_map(data_source)
+
     elif args.map_data:
         list_of_mapped_dfs = []
         for data_source in constants.DATA_SOURCES:
-            # Create brand_id to brand string map from iri or gs1
-            get_brand_id_map(data_source)
             match_brand_str_to_brand_id(data_source)
             # compares mapped_brands_with_indices and duplicates.csv and maps the duplicates
             list_of_mapped_dfs.append(get_all_matches())
@@ -406,7 +435,6 @@ def main():
         count_duplicates()
     elif args.get_closest_match:
         find_nearest_match('iri')
-
     elif args.upload:
         load_into_bq()
     else:
