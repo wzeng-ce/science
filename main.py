@@ -415,8 +415,9 @@ def create_report():
     pre_tagging_mapped_entries_query = """
     SELECT 
         product_brand_id AS brand_id,
-        COUNT(*) AS total_entries,
-        SUM(price_paid) AS total_price_paid
+        STRING_AGG(DISTINCT product_brand, ', ') AS pre_product_brands,
+        COUNT(*) AS pre_total_entries,
+        SUM(price_paid) AS pre_total_price_paid
     FROM `cei-data-science.helios_raw.helios_cpg_products`
     WHERE 
         product_brand_id IS NOT NULL
@@ -431,8 +432,9 @@ def create_report():
         WITH coverage_either_price_paid AS (
             SELECT 
                 ds2.brand_id,
-                COUNT(*) AS total_entries,
-                SUM(ds1.price_paid) AS total_price_paid
+                STRING_AGG(DISTINCT ds1.product_brand, ', ') AS post_product_brands,
+                COUNT(*) AS post_total_entries,
+                SUM(ds1.price_paid) AS post_total_price_paid
             FROM 
                 `cei-data-science.helios_raw.helios_cpg_products` AS ds1
             LEFT JOIN (
@@ -446,19 +448,30 @@ def create_report():
             WHERE 
                 ds2.brand_id IS NOT NULL
                 OR (ds1.product_brand_id IS NOT NULL AND ds1.product_brand IS NOT NULL)
-            GROUP BY ds2.brand_id
+            GROUP BY ds2.brand_id, ds1.product_brand
         )
         SELECT * FROM coverage_either_price_paid;
     """
     query_job = client.query(post_tagging_mapped_entries_query)
     post_tagging_df = query_job.to_dataframe()
-    merged_df = pre_tagging_df.merge(post_tagging_df, on="brand_id", suffixes=("_pre", "_post"))
-    merged_df["entries_percent_increase"] = (((merged_df["total_entries_post"] - merged_df["total_entries_pre"]) /
-                                             merged_df["total_entries_pre"]) * 100).round(2)
-    merged_df["price_percent_increase"] = (((merged_df["total_price_paid_post"] - merged_df["total_price_paid_pre"]) /
-                                           merged_df["total_price_paid_pre"]) * 100).round(2)
-    merged_df = merged_df.sort_values(by="total_entries_post", ascending=False)
-    markdown_table = merged_df.head(100).to_markdown(index=False)
+    # calculate percent increase
+    merged_df = pre_tagging_df.merge(post_tagging_df, on="brand_id")
+    merged_df["entries_percent_increase"] = (((merged_df["post_total_entries"] - merged_df["pre_total_entries"]) /
+                                             merged_df["pre_total_entries"]) * 100).round(2)
+    merged_df["price_percent_increase"] = (((merged_df["post_total_price_paid"] - merged_df["pre_total_price_paid"]) /
+                                           merged_df["pre_total_price_paid"]) * 100).round(2)
+    # combine product_brands and concatenate
+    merged_df["pre_product_brands"] = merged_df["pre_product_brands"].apply(
+        lambda x: x.split(", ") if isinstance(x, str) else [])
+    merged_df["post_product_brands"] = merged_df["post_product_brands"].apply(
+        lambda x: x.split(", ") if isinstance(x, str) else [])
+    merged_df["product_brands"] = merged_df.apply(
+        lambda row: list(set(row["pre_product_brands"] + row["post_product_brands"])), axis=1
+    )
+    merged_df = merged_df.drop(columns=["pre_product_brands", "post_product_brands"])
+
+    merged_df = merged_df.sort_values(by="entries_percent_increase", ascending=False)
+    markdown_table = merged_df.head(500).to_markdown(index=False)
     md_content = f"""# Tagging Coverage Report
 ## Summary Statistics
 - **Total CSVs Processed**: {len(total_entries)}
