@@ -448,7 +448,7 @@ def create_report():
             WHERE 
                 ds2.brand_id IS NOT NULL
                 OR (ds1.product_brand_id IS NOT NULL AND ds1.product_brand IS NOT NULL)
-            GROUP BY ds2.brand_id, ds1.product_brand
+            GROUP BY ds2.brand_id
         )
         SELECT * FROM coverage_either_price_paid;
     """
@@ -470,7 +470,7 @@ def create_report():
     )
     merged_df = merged_df.drop(columns=["pre_product_brands", "post_product_brands"])
 
-    merged_df = merged_df.sort_values(by="entries_percent_increase", ascending=False)
+    merged_df = merged_df.sort_values(by="post_total_entries", ascending=False)
     markdown_table = merged_df.head(500).to_markdown(index=False)
     md_content = f"""# Tagging Coverage Report
 ## Summary Statistics
