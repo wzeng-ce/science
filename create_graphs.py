@@ -7,15 +7,14 @@ client = bigquery.Client()
 def friskies():
     # Get SUM of all price paid by MONTH for EACH brand like FRISKIES
     query = """
-    SELECT 
-        DATE_TRUNC(trans_date, MONTH) AS month,
+    SELECT
+        trans_date,
         product_brand,
         product_brand_id,
-        SUM(price_paid) AS price_paid
-    FROM `cei-data-science.webscrape.helios_cpg_products`
+        asin,
+        price_paid
+    FROM `cei-data-science.helios_raw.helios_cpg_products`
     WHERE UPPER(product_brand) LIKE '%PURINA FRISKIES%'
-    GROUP BY month, product_brand, product_brand_id
-    ORDER BY month;
     """
 
     df = client.query(query).to_dataframe()
@@ -47,8 +46,7 @@ def nature_bounty():
         product_brand_id,
         asin,
         price_paid
-    FROM
-        `cei-data-science.webscrape.helios_cpg_products`
+    FROM `cei-data-science.helios_raw.helios_cpg_products`
     WHERE
         product_brand LIKE '%NATURE%BOUNTY%';
     """

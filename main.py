@@ -8,7 +8,8 @@ from rapidfuzz import process, distance
 from rapidfuzz.process import extractOne, extract
 import unicodedata
 import re
-
+from tabulate import tabulate
+import pprint
 os.makedirs(constants.DEDUPLICATE_BRAND_DIR, exist_ok=True)
 
 def read_data(file_name):
@@ -268,9 +269,8 @@ def get_all_matches():
 def write_mapped_brands(final_mapped_df):
     final_mapped_df = pd.concat(final_mapped_df, ignore_index=True)
     final_mapped_df = final_mapped_df.sort_values(by="symbol_id")
-    file_path = os.path.join(constants.MAPPINGS_DIRECTORY, constants.DELIVERABLE_MAPPED_BRANDS_CSV)
-    final_mapped_df.to_csv(file_path, index=False)
-    print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {file_path}")
+    final_mapped_df.to_csv(constants.DELIVERABLE_MAPPED_BRANDS_CSV, index=False)
+    print(f"{final_mapped_df.shape[0]} entries mapped. All mapped entries saved to {constants.DELIVERABLE_MAPPED_BRANDS_CSV}")
 
 
 def clean_data():
@@ -359,7 +359,7 @@ def find_nearest_match(df_name):
         columns=["iri_brand_string", "found_brand_string", "jarowinkler_distance", "brand_id", "symbol_id", "asin"]
     )
     output_df = output_df.sort_values(by="jarowinkler_distance", ascending=True)
-    output_df.to_csv(os.path.join(constants.MAPPINGS_DIRECTORY, constants.CLOSEST_BRANDS_CSV), index=False)
+    output_df.to_csv(constants.CLOSEST_BRANDS_CSV, index=False)
 
 
 
@@ -380,10 +380,102 @@ def load_into_bq():
     load_job.result()
     print(f"Loaded {load_job.output_rows} rows into {table_id}.")
 
+def create_report():
+    def get_csv_row_counts(path):
+        """
+        Counts the number of rows in all CSV files within a given directory.
+        """
+        row_counts = {}
+        if os.path.isfile(path) and path.endswith(".csv"):
+            try:
+                df = pd.read_csv(path)
+                row_counts[os.path.basename(path)] = len(df)
+            except Exception as e:
+                print(f"Error reading {path}: {e}")
+
+        elif os.path.isdir(path):
+            for file in os.listdir(path):
+                if file.endswith(".csv"):
+                    file_path = os.path.join(path, file)
+                    try:
+                        df = pd.read_csv(file_path)
+                        row_counts[file] = len(df)
+                    except Exception as e:
+                        print(f"Error reading {file}: {e}")
+        else:
+            print(f"Invalid path: {path} (not a CSV file or directory)")
+        return row_counts
+
+    total_entries = get_csv_row_counts(constants.DATA_DIRECTORY)
+    mapped_entries = get_csv_row_counts(constants.DELIVERABLE_MAPPED_BRANDS_CSV)
+    total_products = sum(total_entries.values())
+    coverage_percentage = (list(mapped_entries.values())[0] / total_products) * 100 if total_products > 0 else 0
+    client = bigquery.Client()
+
+    pre_tagging_mapped_entries_query = """
+    SELECT 
+        product_brand_id AS brand_id,
+        COUNT(*) AS total_entries,
+        SUM(price_paid) AS total_price_paid
+    FROM `cei-data-science.helios_raw.helios_cpg_products`
+    WHERE 
+        product_brand_id IS NOT NULL
+        AND product_brand IS NOT NULL
+    GROUP BY product_brand_id;
+    """
+
+    query_job = client.query(pre_tagging_mapped_entries_query)
+    pre_tagging_df = query_job.to_dataframe()
+
+    post_tagging_mapped_entries_query = """
+        WITH coverage_either_price_paid AS (
+            SELECT 
+                ds2.brand_id,
+                COUNT(*) AS total_entries,
+                SUM(ds1.price_paid) AS total_price_paid
+            FROM 
+                `cei-data-science.helios_raw.helios_cpg_products` AS ds1
+            LEFT JOIN (
+                SELECT DISTINCT 
+                    asin, 
+                    brand_id
+                FROM 
+                    `cei-data-science.webscrape.brand_string_to_brand_id_map`
+            ) AS ds2
+            ON ds1.asin = ds2.asin
+            WHERE 
+                ds2.brand_id IS NOT NULL
+                OR (ds1.product_brand_id IS NOT NULL AND ds1.product_brand IS NOT NULL)
+            GROUP BY ds2.brand_id
+        )
+        SELECT * FROM coverage_either_price_paid;
+    """
+    query_job = client.query(post_tagging_mapped_entries_query)
+    post_tagging_df = query_job.to_dataframe()
+    merged_df = pre_tagging_df.merge(post_tagging_df, on="brand_id", suffixes=("_pre", "_post"))
+    merged_df["entries_percent_increase"] = (((merged_df["total_entries_post"] - merged_df["total_entries_pre"]) /
+                                             merged_df["total_entries_pre"]) * 100).round(2)
+    merged_df["price_percent_increase"] = (((merged_df["total_price_paid_post"] - merged_df["total_price_paid_pre"]) /
+                                           merged_df["total_price_paid_pre"]) * 100).round(2)
+    merged_df = merged_df.sort_values(by="total_entries_post", ascending=False)
+    markdown_table = merged_df.head(100).to_markdown(index=False)
+    md_content = f"""# Tagging Coverage Report
+## Summary Statistics
+- **Total CSVs Processed**: {len(total_entries)}
+- **Total Products Processed**: {total_products}
+- **Total Products Mapped**: {list(mapped_entries.values())[0]}
+- **POSEIDON Mapping Coverage (%)**: {round(coverage_percentage, 2)}%
+
+## Detailed Breakdown
+{markdown_table}
+    """
+    with open(constants.HELIOS_COVERAGE_MD, "w") as f:
+        f.write(md_content)
+    print(f"Docs saved to : {constants.HELIOS_COVERAGE_MD}")
+
 
 def main():
-    # Argument parser setup
-    parser = argparse.ArgumentParser(description="String matching using RecordLinkage or RapidFuzz")
+    parser = argparse.ArgumentParser(description="brand str to brand id")
     parser.add_argument(
         "--preprocess",
         action="store_true",
@@ -414,6 +506,11 @@ def main():
         action="store_true",
         help="Map brand_ids to their brands"
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="create a report"
+    )
     args = parser.parse_args()
     if args.preprocess:
         preprocess_data()
@@ -437,6 +534,8 @@ def main():
         find_nearest_match('iri')
     elif args.upload:
         load_into_bq()
+    elif args.stats:
+        create_report()
     else:
         # distance_check()
         print("Invalid selection")
