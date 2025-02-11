@@ -471,7 +471,7 @@ def create_report():
     merged_df = merged_df.drop(columns=["pre_product_brands", "post_product_brands"])
 
     merged_df = merged_df.sort_values(by="post_total_entries", ascending=False)
-    markdown_table = merged_df.head(500).to_markdown(index=False)
+    markdown_table = merged_df.head(100).to_markdown(index=False)
     md_content = f"""# Tagging Coverage Report
 ## Summary Statistics
 - **Total CSVs Processed**: {len(total_entries)}
