@@ -4,6 +4,7 @@ DATA_DIRECTORY = "data"
 MAPPINGS_DIRECTORY = "mappings"
 DEDUPLICATE_BRAND_DIR = "deduplicate_brand"
 DOCS_DIR = "docs"
+GRAPHS_DIR = "graphs"
 
 DATA_SOURCES = ["iri"]
 BRANDS_CSV = "brands.csv"
