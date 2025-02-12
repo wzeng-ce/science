@@ -5,9 +5,7 @@ import argparse
 import os
 import constants
 import numpy as np
-import matplotlib.ticker as mticker
 
-# Creating a dictionary to represent the brand_name to product_brand_id mapping
 brand_id_to_name = {
     29631: "KIMBERLY-CLARK CORPORATION",
     29641: "THE PROCTER & GAMBLE CO",
