@@ -413,16 +413,17 @@ def create_report():
     client = bigquery.Client()
 
     pre_tagging_mapped_entries_query = """
-    SELECT 
-        product_brand_id AS brand_id,
-        STRING_AGG(DISTINCT product_brand, ', ') AS pre_product_brands,
-        COUNT(*) AS pre_total_entries,
-        SUM(price_paid) AS pre_total_price_paid
-    FROM `cei-data-science.helios_raw.helios_cpg_products`
-    WHERE 
-        product_brand_id IS NOT NULL
-        AND product_brand IS NOT NULL
-    GROUP BY product_brand_id;
+SELECT 
+    product_brand_id AS brand_id,
+    STRING_AGG(DISTINCT product_brand, ', ') AS pre_product_brands,
+    COUNT(*) AS pre_total_entries,
+    SUM(price_paid) AS pre_total_price_paid
+FROM `cei-data-science.helios_raw.amzn_item_all_20250115`
+WHERE 
+    product_brand_id IS NOT NULL
+    AND product_brand IS NOT NULL
+    AND DATE(trans_date) > DATE('2020-01-01')
+GROUP BY product_brand_id;
     """
 
     query_job = client.query(pre_tagging_mapped_entries_query)
@@ -454,6 +455,32 @@ def create_report():
     """
     query_job = client.query(post_tagging_mapped_entries_query)
     post_tagging_df = query_job.to_dataframe()
+
+    total_entries_query = """
+        SELECT 
+            COUNT(*) AS total_entries,
+            SUM(price_paid) AS total_price_paid
+        FROM `cei-data-science.helios_raw.amzn_item_all_20250115`
+        WHERE DATE(trans_date) > DATE('2020-01-01');
+    """
+    query_job = client.query(total_entries_query)
+    total_entries_df = query_job.to_dataframe()
+    all_helios_entries = total_entries_df["total_entries"].iloc[0]
+    all_helios_price_paid = total_entries_df["total_price_paid"].iloc[0]
+    # Calculate pre-tagging and post-tagging coverage as a percentage of total entries
+    overall_pre_tagging_coverage = pre_tagging_df["pre_total_entries"].sum() / all_helios_entries * 100
+    overall_post_tagging_coverage = post_tagging_df["post_total_entries"].sum() / all_helios_entries * 100
+
+    # Calculate price paid coverage
+    overall_pre_tagging_price_coverage = pre_tagging_df["pre_total_price_paid"].sum() / all_helios_price_paid * 100
+    overall_post_tagging_price_coverage = post_tagging_df["post_total_price_paid"].sum() / all_helios_price_paid * 100
+
+    # Compute percentage increase in entries
+    overall_coverage_increase = overall_post_tagging_coverage - overall_pre_tagging_coverage
+
+    # Compute percentage increase in price paid coverage
+    overall_price_coverage_increase = overall_post_tagging_price_coverage - overall_pre_tagging_price_coverage
+
     # calculate percent increase
     merged_df = pre_tagging_df.merge(post_tagging_df, on="brand_id")
     merged_df["entries_percent_increase"] = (((merged_df["post_total_entries"] - merged_df["pre_total_entries"]) /
@@ -471,14 +498,23 @@ def create_report():
     merged_df = merged_df.drop(columns=["pre_product_brands", "post_product_brands"])
 
     merged_df = merged_df.sort_values(by="post_total_entries", ascending=False)
-    markdown_table = merged_df.head(100).to_markdown(index=False)
+    markdown_table = merged_df.head(50).to_markdown(index=False)
     md_content = f"""# Tagging Coverage Report
-## Summary Statistics
+## POSEIDON Summary Statistics
 - **Total CSVs Processed**: {len(total_entries)}
 - **Total Products Processed**: {total_products}
 - **Total Products Mapped**: {list(mapped_entries.values())[0]}
-- **POSEIDON Mapping Coverage (%)**: {round(coverage_percentage, 2)}%
-
+- ** Mapping Coverage (%)**: {round(coverage_percentage, 2)}%
+## HELIOS Summary Statistics
+- **Total Entries:** {all_helios_entries}
+- **Total Price Paid:** ${all_helios_price_paid:.2f}
+- **Pre-Tagging Overall Coverage:** {overall_pre_tagging_coverage:.2f}%
+- **Post-Tagging Overall Coverage:** {overall_post_tagging_coverage:.2f}%
+- **Overall Coverage Increase:** {overall_coverage_increase:.2f}%
+## Price Paid Coverage
+- **Pre-Tagging Overall Price Coverage:** {overall_pre_tagging_price_coverage:.2f}%
+- **Post-Tagging Overall Price Coverage:** {overall_post_tagging_price_coverage:.2f}%
+- **Overall Price Paid Coverage Increase:** {overall_price_coverage_increase:.2f}%
 ## Detailed Breakdown
 {markdown_table}
     """
