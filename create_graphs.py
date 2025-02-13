@@ -76,7 +76,7 @@ WITH brand_mapping AS (
         FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
     ) AS ds2
     ON ds1.asin = ds2.asin
-    WHERE ds1.product_brand IS NULL  -- Only match ASIN if brand was missing
+    WHERE ds1.product_brand IS NULL
 )
 
 SELECT 
@@ -128,42 +128,92 @@ ORDER BY product_brand_id, quarter;
         plt.savefig(file_path, dpi=300, bbox_inches='tight')
 
 
-def nature_bounty():
+def purina():
     query = """
-    SELECT
-        trans_date,
-        product_brand,
-        product_brand_id,
-        asin,
-        price_paid
-    FROM `cei-data-science.helios_raw.helios_cpg_products`
-    WHERE
-        product_brand LIKE '%NATURE%BOUNTY%';
+WITH brand_mapping AS (
+    -- First attempt: Join on product_brand
+    SELECT 
+        ds1.product_brand_id,
+        ds1.product_brand AS product_brand,
+        DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
+        ds1.price_paid,
+        ds2.brand_id
+    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    LEFT JOIN (
+        SELECT DISTINCT brand_string, brand_id 
+        FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
+    ) AS ds2
+    ON ds1.product_brand = ds2.brand_string
+
+    UNION ALL
+
+    -- Second attempt: Join on ASIN ONLY IF brand was NULL
+    SELECT 
+        ds1.product_brand_id,
+        ds1.product_brand AS product_brand,
+        DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
+        ds1.price_paid,
+        ds2.brand_id
+    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    LEFT JOIN (
+        SELECT DISTINCT asin, brand_id 
+        FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
+    ) AS ds2
+    ON ds1.asin = ds2.asin
+    WHERE ds1.product_brand IS NULL  -- Only match ASIN if brand was missing
+)
+
+SELECT 
+    product_brand,
+    quarter,
+    SUM(price_paid) AS total_price_paid
+FROM brand_mapping
+WHERE 
+    COALESCE(brand_id, product_brand_id) IN (24739)
+    AND quarter > DATE('2020-01-01')
+    AND quarter < DATE('2025-01-01')
+GROUP BY product_brand, quarter
+ORDER BY product_brand, quarter;
     """
 
-    df = client.query(query).to_dataframe()
-    df['trans_date'] = pd.to_datetime(df['trans_date'])
-    # we just care about the monthly
-    df['year_month'] = df['trans_date'].dt.to_period('M').astype(str)
+    purina_df = client.query(query).to_dataframe()
+    # Ensure 'quarter' column is datetime
+    purina_df["quarter"] = pd.to_datetime(purina_df["quarter"])
+    purina_graph_dir = os.path.join(constants.GRAPHS_DIR, "PURINA")
+    # Ensure graphs directory exists
+    os.makedirs(purina_graph_dir, exist_ok=True)
 
-    print(df.head())
-    df_tagged = df[df['product_brand_id'].notnull()].groupby('year_month', as_index=False)['price_paid'].sum()
-    df_untagged = df[df['product_brand_id'].isnull()].groupby('year_month', as_index=False)['price_paid'].sum()
+    # Filter to only product brands that start with "PURINA"
+    purina_df_filtered = purina_df[purina_df["product_brand"].fillna("").str.startswith("PURINA")]
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(df_tagged['year_month'], df_tagged['price_paid'], linestyle="dashed", marker="o", label="Base Helios Tag")
-    plt.plot(df_untagged['year_month'], df_untagged['price_paid'], linestyle="dashed", marker="o", label="Untagged Natures Bounty", alpha=0.7)
+    # Get unique product brands under PURINA prefix
+    unique_purina_brands_filtered = purina_df_filtered["product_brand"].unique()
 
-    plt.title("Natures Bounty Sales Over Time", fontsize=14)
-    plt.xlabel("year_month", fontsize=12)
-    plt.ylabel("Total Sales ($)", fontsize=12)
-    plt.xticks(rotation=45)
-    plt.legend(loc='upper left')
-    plt.grid(True)
+    # Define batch size (10 brands per graph)
+    batch_size = 10
 
-    df.sort_values(by='year_month').to_csv('natures_bounty_sales_over_time.csv', index=False)
-    plt.savefig("natures_bounty_sales_over_time.png", dpi=300, bbox_inches='tight')
+    # Generate multi-line plots in batches of 10 brands
+    for i in range(0, len(unique_purina_brands_filtered), batch_size):
+        batch_brands = unique_purina_brands_filtered[i:i + batch_size]
+        batch_df = purina_df_filtered[purina_df_filtered["product_brand"].isin(batch_brands)]
 
+        # Pivot DataFrame to reshape for multiple line plotting
+        batch_pivot = batch_df.pivot(index="quarter", columns="product_brand", values="total_price_paid")
+
+        plt.figure(figsize=(12, 6))
+        for brand in batch_pivot.columns:
+            plt.plot(batch_pivot.index, batch_pivot[brand], label=brand, marker='o')
+
+        plt.xlabel("Quarter")
+        plt.ylabel("Total Price Paid")
+        plt.title(f"Total Sales by Quarter for PURINA Brands (Batch {i // batch_size + 1})")
+        plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        # Save the plot
+        file_path = os.path.join(purina_graph_dir, f"purina_batch_{i // batch_size + 1}.png")
+        plt.savefig(file_path, dpi=300, bbox_inches='tight')
 
 
 
@@ -176,15 +226,15 @@ def main():
         help="generate coverage graphs before we applied brand_string to brand_id mappings",
     )
     parser.add_argument(
-        "--natures_bounty",
+        "--purina",
         action="store_true",
         help="preprocess the data",
     )
     args = parser.parse_args()
     if args.generate_before:
         generate_before_mapping_graphs()
-    if args.natures_bounty:
-        nature_bounty()
+    if args.purina:
+        purina()
 
 
 if __name__ == "__main__":
