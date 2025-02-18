@@ -34,13 +34,13 @@ brand_id_to_name = {
 }
 
 client = bigquery.Client()
-def generate_before_mapping_graphs():
+def generate_before_after_graphs():
     before_mapping_query = """
 SELECT 
     product_brand_id,
     DATE_TRUNC(trans_date, QUARTER) AS quarter,
     SUM(price_paid) AS total_price_paid
-FROM `cei-data-science.helios_raw.amzn_item_all_20250115`
+FROM `cei-data-science.helios_raw.helios_cleaned_product_brand`
 WHERE product_brand_id IN (29631, 29641, 10010, 24739, 29649, 29628, 28504, 30168, 29610, 13536, 29643, 20136, 29633, 29638, 24108, 29655, 15833, 30515, 29629)
 AND DATE(trans_date) > DATE('2020-01-01')
 GROUP BY product_brand_id, quarter
@@ -55,12 +55,12 @@ WITH brand_mapping AS (
         DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
         ds1.price_paid,
         ds2.brand_id
-    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    FROM `cei-data-science.helios_raw.helios_cleaned_product_brand` AS ds1
     LEFT JOIN (
         SELECT DISTINCT brand_string, brand_id 
         FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
     ) AS ds2
-    ON ds1.product_brand = ds2.brand_string
+    ON ds1.product_brand_cleaned = ds2.brand_string
 
     UNION ALL
 
@@ -70,13 +70,13 @@ WITH brand_mapping AS (
         DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
         ds1.price_paid,
         ds2.brand_id
-    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    FROM `cei-data-science.helios_raw.helios_cleaned_product_brand` AS ds1
     LEFT JOIN (
         SELECT DISTINCT asin, brand_id 
         FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
     ) AS ds2
     ON ds1.asin = ds2.asin
-    WHERE ds1.product_brand IS NULL
+    WHERE ds1.product_brand_cleaned IS NULL
 )
 
 SELECT 
@@ -134,33 +134,33 @@ WITH brand_mapping AS (
     -- First attempt: Join on product_brand
     SELECT 
         ds1.product_brand_id,
-        ds1.product_brand AS product_brand,
+        ds1.product_brand_cleaned AS product_brand,
         DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
         ds1.price_paid,
         ds2.brand_id
-    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    FROM `cei-data-science.helios_raw.helios_cleaned_product_brand` AS ds1
     LEFT JOIN (
         SELECT DISTINCT brand_string, brand_id 
         FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
     ) AS ds2
-    ON ds1.product_brand = ds2.brand_string
+    ON ds1.product_brand_cleaned = ds2.brand_string
 
     UNION ALL
 
     -- Second attempt: Join on ASIN ONLY IF brand was NULL
     SELECT 
         ds1.product_brand_id,
-        ds1.product_brand AS product_brand,
+        ds1.product_brand_cleaned AS product_brand,
         DATE_TRUNC(ds1.trans_date, QUARTER) AS quarter,
         ds1.price_paid,
         ds2.brand_id
-    FROM `cei-data-science.helios_raw.amzn_item_all_20250115` AS ds1
+    FROM `cei-data-science.helios_raw.helios_cleaned_product_brand` AS ds1
     LEFT JOIN (
         SELECT DISTINCT asin, brand_id 
         FROM `cei-data-science.webscrape.brand_string_to_brand_id_map`
     ) AS ds2
     ON ds1.asin = ds2.asin
-    WHERE ds1.product_brand IS NULL  -- Only match ASIN if brand was missing
+    WHERE ds1.product_brand_cleaned IS NULL  -- Only match ASIN if brand was missing
 )
 
 SELECT 
@@ -177,19 +177,11 @@ ORDER BY product_brand, quarter;
     """
 
     purina_df = client.query(query).to_dataframe()
-    # Ensure 'quarter' column is datetime
     purina_df["quarter"] = pd.to_datetime(purina_df["quarter"])
     purina_graph_dir = os.path.join(constants.GRAPHS_DIR, "PURINA")
-    # Ensure graphs directory exists
-    os.makedirs(purina_graph_dir, exist_ok=True)
 
-    # Filter to only product brands that start with "PURINA"
     purina_df_filtered = purina_df[purina_df["product_brand"].fillna("").str.startswith("PURINA")]
-
-    # Get unique product brands under PURINA prefix
     unique_purina_brands_filtered = purina_df_filtered["product_brand"].unique()
-
-    # Define batch size (10 brands per graph)
     batch_size = 10
 
     # Generate multi-line plots in batches of 10 brands
@@ -199,7 +191,6 @@ ORDER BY product_brand, quarter;
 
         # Pivot DataFrame to reshape for multiple line plotting
         batch_pivot = batch_df.pivot(index="quarter", columns="product_brand", values="total_price_paid")
-
         plt.figure(figsize=(12, 6))
         for brand in batch_pivot.columns:
             plt.plot(batch_pivot.index, batch_pivot[brand], label=brand, marker='o')
@@ -211,7 +202,6 @@ ORDER BY product_brand, quarter;
         plt.xticks(rotation=45)
         plt.tight_layout()
 
-        # Save the plot
         file_path = os.path.join(purina_graph_dir, f"purina_batch_{i // batch_size + 1}.png")
         plt.savefig(file_path, dpi=300, bbox_inches='tight')
 
@@ -221,7 +211,7 @@ def main():
     # Argument parser setup
     parser = argparse.ArgumentParser(description="String matching using RecordLinkage or RapidFuzz")
     parser.add_argument(
-        "--generate_before",
+        "--before_after",
         action="store_true",
         help="generate coverage graphs before we applied brand_string to brand_id mappings",
     )
@@ -231,8 +221,8 @@ def main():
         help="preprocess the data",
     )
     args = parser.parse_args()
-    if args.generate_before:
-        generate_before_mapping_graphs()
+    if args.before_after:
+        generate_before_after_graphs()
     if args.purina:
         purina()
 
