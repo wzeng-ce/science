@@ -415,13 +415,13 @@ def create_report():
     pre_tagging_mapped_entries_query = """
 SELECT 
     product_brand_id AS brand_id,
-    STRING_AGG(DISTINCT product_brand, ', ') AS pre_product_brands,
+    STRING_AGG(DISTINCT product_brand_cleaned, ', ') AS pre_product_brands,
     COUNT(*) AS pre_total_entries,
     SUM(price_paid) AS pre_total_price_paid
-FROM `cei-data-science.helios_raw.amzn_item_all_20250115`
+FROM `cei-data-science.helios_raw.helios_cleaned_product_brand`
 WHERE 
     product_brand_id IS NOT NULL
-    AND product_brand IS NOT NULL
+    AND product_brand_cleaned IS NOT NULL
     AND DATE(trans_date) > DATE('2020-01-01')
 GROUP BY product_brand_id;
     """
@@ -433,22 +433,22 @@ GROUP BY product_brand_id;
         WITH coverage_either_price_paid AS (
             SELECT 
                 ds2.brand_id,
-                STRING_AGG(DISTINCT ds1.product_brand, ', ') AS post_product_brands,
+                STRING_AGG(DISTINCT ds1.product_brand_cleaned, ', ') AS post_product_brands,
                 COUNT(*) AS post_total_entries,
                 SUM(ds1.price_paid) AS post_total_price_paid
             FROM 
-                `cei-data-science.helios_raw.helios_cpg_products` AS ds1
+                `cei-data-science.helios_raw.helios_cleaned_product_brand` AS ds1
             LEFT JOIN (
                 SELECT DISTINCT 
-                    asin, 
+                    brand_string, 
                     brand_id
                 FROM 
                     `cei-data-science.webscrape.brand_string_to_brand_id_map`
             ) AS ds2
-            ON ds1.asin = ds2.asin
+            ON ds1.product_brand_cleaned = ds2.brand_string
             WHERE 
                 ds2.brand_id IS NOT NULL
-                OR (ds1.product_brand_id IS NOT NULL AND ds1.product_brand IS NOT NULL)
+                OR (ds1.product_brand_id IS NOT NULL AND ds1.product_brand_cleaned IS NOT NULL)
             GROUP BY ds2.brand_id
         )
         SELECT * FROM coverage_either_price_paid;
@@ -460,7 +460,7 @@ GROUP BY product_brand_id;
         SELECT 
             COUNT(*) AS total_entries,
             SUM(price_paid) AS total_price_paid
-        FROM `cei-data-science.helios_raw.amzn_item_all_20250115`
+        FROM `cei-data-science.helios_raw.helios_cleaned_product_brand`
         WHERE DATE(trans_date) > DATE('2020-01-01');
     """
     query_job = client.query(total_entries_query)
